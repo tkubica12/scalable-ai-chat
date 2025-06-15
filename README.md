@@ -6,8 +6,8 @@ This repo is leveraging cloud scale-to-zero services in Azure, fully automated w
 ## [Architecture](./docs/Architecture.md)
 Architecture overview of the project, evolving together with the code (in fact, architecture is created first and then used as context for GitHub Copilot when doing AI-assisted development).
 
-## How to run
-TBD
+## [How to run](./docs/HowToRun.md)
+Instructions on how to deploy and run the project, including Terraform deployment to Azure and local testing.
 
 ## Results
 TBD
