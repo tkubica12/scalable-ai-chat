@@ -16,7 +16,7 @@ resource "azapi_resource" "history_worker" {
         containers = [
           {
             name  = "history-worker"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-history-worker:latest"
+            image = "ghcr.io/${var.github_repository}/history-worker:latest"
             resources = {
               cpu    = 0.25
               memory = "0.5Gi"
@@ -45,7 +45,7 @@ resource "azapi_resource" "history_worker" {
               {
                 name  = "COSMOS_CONTAINER_NAME"
                 value = azapi_resource.history_conversations.name
-              },              {
+                }, {
                 name  = "REDIS_HOST"
                 value = azapi_resource.redis.output.properties.hostName
               },
@@ -76,13 +76,13 @@ resource "azapi_resource" "history_worker" {
               {
                 name  = "AZURE_AI_CHAT_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
-              }
-            ]
+            }]
           }
         ]
         scale = {
-          minReplicas = 0
-          maxReplicas = 5
+          cooldownPeriod = var.container_app_cooldown_period
+          minReplicas    = var.container_app_min_replicas
+          maxReplicas    = 5
           rules = [
             {
               name = "service-bus-topic-scale-rule"

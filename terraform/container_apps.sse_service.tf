@@ -24,25 +24,25 @@ resource "azapi_resource" "sse_service" {
           ]
         }
       }
-      template = {
-        scale = {
-          minReplicas = 0
-          maxReplicas = 10
-          rules = [
-            {
-              name = "http-scale-rule"
-              http = {
-                metadata = {
-                  concurrentRequests = "20"
-                }
+      template = { scale = {
+        cooldownPeriod = var.container_app_cooldown_period
+        minReplicas    = var.container_app_min_replicas
+        maxReplicas    = 10
+        rules = [
+          {
+            name = "http-scale-rule"
+            http = {
+              metadata = {
+                concurrentRequests = "20"
               }
             }
-          ]
+          }
+        ]
         }
         containers = [
           {
             name  = "sse-service"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-sse-service:latest"
+            image = "ghcr.io/${var.github_repository}/sse-service:latest"
             resources = {
               cpu    = 0.5
               memory = "1Gi"

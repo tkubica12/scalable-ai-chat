@@ -12,13 +12,13 @@ resource "azapi_resource" "memory_api" {
       configuration = {
         activeRevisionsMode = "Single"
         ingress = {
-          external   = true
-          targetPort = 8003
-          transport  = "http"
+          external      = true
+          targetPort    = 8003
+          transport     = "http"
           allowInsecure = false
           traffic = [
             {
-              weight = 100
+              weight         = 100
               latestRevision = true
             }
           ]
@@ -28,7 +28,7 @@ resource "azapi_resource" "memory_api" {
         containers = [
           {
             name  = "memory-api"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-memory-api:latest"
+            image = "ghcr.io/${var.github_repository}/memory-api:latest"
             resources = {
               cpu    = 0.25
               memory = "0.5Gi"
@@ -73,13 +73,13 @@ resource "azapi_resource" "memory_api" {
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "memory-api"
-              }
-            ]
+            }]
           }
         ]
         scale = {
-          minReplicas = 0
-          maxReplicas = 5
+          cooldownPeriod = var.container_app_cooldown_period
+          minReplicas    = var.container_app_min_replicas
+          maxReplicas    = 5
           rules = [
             {
               name = "http-scale-rule"

@@ -16,7 +16,7 @@ resource "azapi_resource" "memory_worker" {
         containers = [
           {
             name  = "memory-worker"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-memory-worker:latest"
+            image = "ghcr.io/${var.github_repository}/memory-worker:latest"
             resources = {
               cpu    = 0.25
               memory = "0.5Gi"
@@ -35,20 +35,31 @@ resource "azapi_resource" "memory_worker" {
                 value = azurerm_servicebus_subscription.memory_worker_message_completed.name
               },
               {
+                name  = "COSMOS_ENDPOINT"
+                value = azurerm_cosmosdb_account.main.endpoint
+              },
+              {
+                name  = "COSMOS_DATABASE_NAME"
+                value = azurerm_cosmosdb_sql_database.memory.name
+              },
+              {
+                name  = "COSMOS_CONTAINER_NAME_CONVERSATIONS"
+                value = azapi_resource.memory_conversations.name
+              },
+              {
+                name  = "COSMOS_CONTAINER_NAME_USER_MEMORIES"
+                value = azapi_resource.memory_user_memories.name
+              },
+              {
                 name  = "REDIS_HOST"
                 value = azapi_resource.redis.output.properties.hostName
               },
               {
-                name  = "REDIS_PORT"
-                value = "10000"
-              },
+                name = "REDIS_PORT"
+              value = "10000" },
               {
                 name  = "REDIS_SSL"
                 value = "true"
-              },
-              {
-                name  = "MEMORY_API_BASE_URL"
-                value = "https://${azapi_resource.memory_api.output.properties.configuration.ingress.fqdn}"
               },
               {
                 name  = "AZURE_AI_CHAT_ENDPOINT"
@@ -73,13 +84,13 @@ resource "azapi_resource" "memory_worker" {
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "memory-worker"
-              }
-            ]
+            }]
           }
         ]
         scale = {
-          minReplicas = 0
-          maxReplicas = 5
+          cooldownPeriod = var.container_app_cooldown_period
+          minReplicas    = var.container_app_min_replicas
+          maxReplicas    = 5
           rules = [
             {
               name = "service-bus-topic-scale-rule"

@@ -1,5 +1,5 @@
 resource "azapi_resource" "front_service" {
-  type      = "Microsoft.App/containerApps@2025-01-01" 
+  type      = "Microsoft.App/containerApps@2025-01-01"
   name      = "ca-frontservice-${local.base_name}"
   location  = azurerm_resource_group.main.location
   parent_id = azurerm_resource_group.main.id
@@ -24,25 +24,25 @@ resource "azapi_resource" "front_service" {
           ]
         }
       }
-      template = {
-        scale = {
-          minReplicas = 0
-          maxReplicas = 10
-          rules = [
-            {
-              name = "http-scale-rule"
-              http = {
-                metadata = {
-                  concurrentRequests = "20"
-                }
+      template = { scale = {
+        cooldownPeriod = var.container_app_cooldown_period
+        minReplicas    = var.container_app_min_replicas
+        maxReplicas    = 10
+        rules = [
+          {
+            name = "http-scale-rule"
+            http = {
+              metadata = {
+                concurrentRequests = "20"
               }
             }
-          ]
+          }
+        ]
         }
         containers = [
           {
             name  = "front-service"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-front-service:latest"
+            image = "ghcr.io/${var.github_repository}/front-service:latest"
             resources = {
               cpu    = 0.5
               memory = "1Gi"

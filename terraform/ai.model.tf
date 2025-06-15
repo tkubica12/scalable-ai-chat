@@ -1,11 +1,11 @@
 // Azure OpenAI models
 resource "azurerm_cognitive_deployment" "openai_model" {
-  name                 = "gpt-4.1-nano"
+  name                 = "gpt-4.1-mini"
   cognitive_account_id = azapi_resource.ai_service.id
 
   model {
     format  = "OpenAI"
-    name    = "gpt-4.1-nano"
+    name    = "gpt-4.1-mini"
     version = "2025-04-14"
   }
 

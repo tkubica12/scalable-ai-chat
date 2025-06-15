@@ -10,9 +10,9 @@ resource "azapi_resource" "web_client" {
       configuration = {
         activeRevisionsMode = "Single"
         ingress = {
-          external    = true
-          targetPort  = 80
-          transport   = "Http"
+          external   = true
+          targetPort = 80
+          transport  = "Http"
           traffic = [
             {
               latestRevision = true
@@ -21,25 +21,25 @@ resource "azapi_resource" "web_client" {
           ]
         }
       }
-      template = {
-        scale = {
-          minReplicas = 0
-          maxReplicas = 3
-          rules = [
-            {
-              name = "http-scale-rule"
-              http = {
-                metadata = {
-                  concurrentRequests = "50"
-                }
+      template = { scale = {
+        cooldownPeriod = var.container_app_cooldown_period
+        minReplicas    = var.container_app_min_replicas
+        maxReplicas    = 3
+        rules = [
+          {
+            name = "http-scale-rule"
+            http = {
+              metadata = {
+                concurrentRequests = "50"
               }
             }
-          ]
+          }
+        ]
         }
         containers = [
           {
             name  = "web-client"
-            image = "ghcr.io/tkubica12/azure-workshops/d-ai-app-patterns-scalable-chat-web-client:latest"
+            image = "ghcr.io/${var.github_repository}/web-client:latest"
             resources = {
               cpu    = 0.25
               memory = "0.5Gi"
@@ -52,12 +52,19 @@ resource "azapi_resource" "web_client" {
               {
                 name  = "SSE_URL"
                 value = "https://${azapi_resource.sse_service.output.properties.configuration.ingress.fqdn}"
-              }
+              },
+              {
+                name  = "HISTORY_API_URL"
+                value = "https://${azapi_resource.history_api.output.properties.configuration.ingress.fqdn}"
+              },
+              {
+                name  = "MEMORY_API_URL"
+                value = "https://${azapi_resource.memory_api.output.properties.configuration.ingress.fqdn}"
+              },
             ]
           }
         ]
       }
     }
   }
-
 }
