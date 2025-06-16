@@ -10,8 +10,7 @@
   - [User Management and Authentication](#user-management-and-authentication)
   - [Conversational history architecture](#conversational-history-architecture)
     - [Data Consistency Model](#data-consistency-model)
-    - [Short-term data schema](#short-term-data-schema)
-    - [Long-term data schema](#long-term-data-schema)
+    - [Conversational History Data Structures](#conversational-history-data-structures)
   - [Memory Architecture](#memory-architecture)
     - [Memory Components:](#memory-components)
     - [Memory Data Structures](#memory-data-structures)
@@ -34,8 +33,8 @@ This architecture enables a scalable, reliable, and secure chat application usin
 - **Azure Cosmos DB (Long-term Store):** Persistent storage for conversation history with configurable retention. Provides multi-region capabilities and serves as the authoritative source for historical conversations beyond the Redis cache window. Also used for storing and querying long-term user memories.
 - **History Worker:** Listens to `message-completed` events and **persists** conversations to Cosmos DB, generates titles.
 - **History API:** Stateless REST service that **serves history to the web client** (`GET /conversations`, `GET /messages`, `PUT /title`). Reads recent data from Redis, full history from Cosmos DB.
-- **Memory Worker:** Listens to `message-completed` events and processes completed conversations to extract and store long-term user memories. Updates the memory stores based on conversation data.  
-- **Memory API/MCP:** Service that manages user memories and provides dual interfaces - MCP (Model Context Protocol) for Worker Service to retrieve memories during LLM processing, and REST API for Client UI to display memories to users.
+- **Memory Worker:** Listens to `message-completed` events and processes completed conversations to extract and store long-term user memories. Directly updates Cosmos DB with conversation summaries and user memory updates.  
+- **Memory API:** Stateless REST service that **serves user memories and conversation search to clients and the LLM Worker**. Provides REST endpoints for retrieving user memories (`GET /users/{id}/memories`) and searching conversation memories (`POST /users/{id}/conversations/search`). Similar to History API, it's a read service that queries Cosmos DB.
 - **Long-term Memory Stack:**
   - **Azure Cosmos DB:** Stores conversation summaries with vector embeddings (in a `conversations` collection) and structured user profile data (in a `user-memories` collection). Detailed data structures are described in the Memory Architecture section.
 - **LLM API (e.g., Azure OpenAI Service):** An external service that generates the chat response. Supports streaming output, function calling, and receives both conversation context and long-term user memories. Can dynamically request additional context through conversation search functions.
@@ -63,22 +62,23 @@ flowchart LR
         MemoryAPI[Memory API/MCP]
         CosmosDBMem[(Azure Cosmos DB for Memory)]
     end
-    Worker -->|fetch memory| MemoryAPI
+    Worker -->|fetch memory| MemoryAPI    
     MemoryAPI -->|query memories| CosmosDBMem
     CompletedTopic --> MemoryWorker
+    MemoryWorker -->|fetch conversation| Redis
     MemoryWorker -->|update memory| MemoryAPI
 
     Worker -->|stream tokens| TokenTopic[[token-streams topic]]
     Worker -->|completed message| CompletedTopic[[message-completed topic]]
     TokenTopic -->|tokens| SSE
-    SSE -->|SSE stream| Client
-
+    SSE -->|SSE stream| Client    
     subgraph HistoryService["History Service"]
         HistoryWorker[History Worker]
         HistoryAPI[History API]
         CosmosDB[(Azure Cosmos DB)]
     end
     CompletedTopic --> HistoryWorker
+    HistoryWorker -->|fetch conversation| Redis
     HistoryWorker -->|persist| CosmosDB    
     Client -->|read history / rename conversation| HistoryAPI
     Client -->|read user memories| MemoryAPI
@@ -193,18 +193,20 @@ sequenceDiagram
     participant W as Worker Service
     participant CC as message-completed topic
     participant MW as Memory Worker
-    participant MA as Memory API/MCP
+    participant R as Redis
     participant CDBM as Azure Cosmos DB (Memory)
 
     W->>CC: 1. Publish completed message
     CC-->>MW: 2. Memory worker dequeues message
-    MW->>MA: 3. Send completed conversation to Memory API/MCP
-    MA->>CDBM: 3a. Store/update conversation summary, entities, and vector embedding in 'conversations' collection
-    MA->>CDBM: 3b. Store/update semi-structured user data in 'user-memories' collection
+    MW->>R: 3. Fetch conversation data from Redis
+    MW->>CDBM: 4. Store/update conversation summary, entities, and vector embedding in 'conversations' collection
+    MW->>CDBM: 5. Store/update semi-structured user data in 'user-memories' collection
 ```
 1.  **Worker → message-completed topic:** Similar to the history system, the Worker service publishes a message to the `message-completed` topic upon completing a chat interaction.
 2.  **message-completed topic → Memory Worker:** The Memory Worker, also subscribed to the `message-completed` topic, dequeues the message.
-3.  **Memory Worker → Memory API/MCP:** The Memory Worker sends the completed conversation data to the Memory API/MCP service. The Memory API/MCP analyzes the conversation to extract or update long-term user memories, which are then stored in Azure Cosmos DB as described in the **Long-term Memory Stack** section above.
+3.  **Memory Worker → Redis (Fetch Conversation Data):** The Memory Worker fetches the complete conversation session data from Redis using the `sessionId`.
+4.  **Memory Worker → Cosmos DB (Store Conversation Memory):** The Memory Worker directly stores conversation summaries, entities, and vector embeddings in the 'conversations' collection of Cosmos DB.
+5.  **Memory Worker → Cosmos DB (Update User Memory):** The Memory Worker directly updates semi-structured user profile data in the 'user-memories' collection of Cosmos DB.
 
 *Note: We use `sessionId` as the Service Bus session key for all chat-related messages. This allows the SSE service to open a session receiver for a specific session and only receive messages for that session, without filtering or processing unrelated messages. This approach enables stateless, horizontally scalable services, as any SSE service instance can handle any session. The `chatMessageId` is used to correlate individual questions and responses within a session, especially when a user sends multiple questions in the same session. The front service is lightweight and only handles message queuing, while the SSE service handles all streaming concerns. The worker service writes to Redis synchronously for immediate consistency and publishes to the message-completed topic for asynchronous long-term persistence and memory processing. This design achieves both scalability and simplicity through clear separation of concerns.*
 
@@ -243,57 +245,40 @@ The system implements a **hierarchical storage approach** that balances performa
 
 **Asynchronous Cosmos DB Persistence:** Completed conversations are persisted to Cosmos DB via the History Service through the message-completed topic, where eventual consistency is acceptable for historical data.
 
-### Short-term data schema
-```
-Key: session:{sessionId}
-TTL: 24 hours
-Structure: {
-  "sessionId": "sess_abc123",
-  "userId": "user_001", 
-  "createdAt": "2025-06-05T10:00:00Z",
-  "lastActivity": "2025-06-05T11:30:00Z",
-  "title": "Machine Learning Discussion",
-  "messages": [
-    {
-      "messageId": "msg_001",
-      "role": "user",
-      "content": "What is machine learning?",
-      "timestamp": "2025-06-05T10:00:00Z"
-    },
-    {
-      "messageId": "msg_002", 
-      "role": "assistant",
-      "content": "Machine learning is a subset of artificial intelligence...",
-      "timestamp": "2025-06-05T10:00:15Z"
-    }
-  ]
-}
-```
+### Conversational History Data Structures
 
-### Long-term data schema
-```
-{
-  "sessionId": "sess_abc123",    // This is unique identifier for the conversation
-  "userId": "user_001",  // This is partition key
-  "title": "Machine Learning Discussion",
-  "createdAt": "2025-06-05T10:00:00Z",
-  "lastActivity": "2025-06-05T11:30:00Z",
-  "messages": [
-    {
-      "messageId": "msg_001",
-      "role": "user",
-      "content": "What is machine learning?",
-      "timestamp": "2025-06-05T10:00:00Z"
-    },
-    {
-      "messageId": "msg_002", 
-      "role": "assistant",
-      "content": "Machine learning is a subset of artificial intelligence...",
-      "timestamp": "2025-06-05T10:00:15Z"
-    }
-  ]
-}
-```
+The system stores conversation data in a hierarchical approach using Redis for short-term storage and Cosmos DB for long-term persistence:
+
+#### Short-term Storage (Redis)
+- **Purpose:** Fast lookup storage for active conversations with 24-hour TTL, optimized for LLM worker performance.
+- **Key Pattern:** `session:{sessionId}`
+- **TTL:** 24 hours
+- **Structure:** Each Redis entry contains:
+  - `sessionId`: Unique identifier for the conversation session
+  - `userId`: ID of the user who owns this conversation (used for authorization and data isolation)
+  - `createdAt`: ISO 8601 timestamp when the conversation was first created
+  - `lastActivity`: ISO 8601 timestamp of the most recent message in the conversation
+  - `title`: Human-readable title for the conversation (initially null, generated by History Worker)
+  - `messages`: Array of message objects in chronological order, where each message contains:
+    - `messageId`: Unique identifier for the individual message (format: `{chatMessageId}_{role}`)
+    - `role`: Either "system", "user", or "assistant" indicating message type
+    - `content`: The actual text content of the message
+    - `timestamp`: ISO 8601 timestamp when the message was created
+
+#### Long-term Storage (Cosmos DB)
+- **Purpose:** Persistent storage for conversation history with configurable retention and multi-region capabilities.
+- **Collection:** Configured by `COSMOS_CONTAINER_NAME` environment variable
+- **Partition Key:** `userId`
+- **Document ID:** `sessionId`
+- **Structure:** Each document contains all Redis fields plus additional persistence metadata:
+  - `id`: Document identifier (matches `sessionId`)
+  - `sessionId`: Unique identifier for the conversation session
+  - `userId`: ID of the user who owns this conversation (partition key)
+  - `title`: Human-readable title generated by LLM based on conversation content
+  - `createdAt`: ISO 8601 timestamp when the conversation was first created
+  - `lastActivity`: ISO 8601 timestamp of the most recent message in the conversation
+  - `messages`: Array of message objects (same structure as Redis)
+  - `persistedAt`: ISO 8601 timestamp when the conversation was persisted to Cosmos DB
 
 ## Memory Architecture
 **Memory API/MCP Integration:** The system integrates a Memory API/MCP service for sophisticated user memory management, enabling personalized experiences across conversations:
