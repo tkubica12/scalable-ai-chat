@@ -53,10 +53,12 @@ resource "azapi_resource" "llm_worker" {
               {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
-              },
-              {
+              },              {
                 name  = "OTEL_SERVICE_NAME"
                 value = "llm-worker"
+                }, {
+                name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+                value = "true"
                 }, {
                 name  = "AZURE_AI_CHAT_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"

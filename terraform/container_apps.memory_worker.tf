@@ -80,10 +80,13 @@ resource "azapi_resource" "memory_worker" {
               {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
-              },
-              {
+              },              {
                 name  = "OTEL_SERVICE_NAME"
                 value = "memory-worker"
+              },
+              {
+                name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+                value = "true"
             }]
           }
         ]
