@@ -3,6 +3,7 @@
 
 param(
     [string[]]$Services = @(),
+    [string[]]$Exclude = @(),
     [switch]$Help
 )
 
@@ -20,7 +21,12 @@ $AllServices = @(
 function Show-Help {
     Write-Host "Scalable AI Chat - Local Development Starter" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Usage: .\dev-start.ps1 [Services...] [-Help]" -ForegroundColor Yellow
+    Write-Host "Usage: .\dev-start.ps1 [Services...] [-Exclude Services...] [-Help]" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Parameters:" -ForegroundColor Cyan
+    Write-Host "  Services    - Specific services to start (if empty, all services are started)" -ForegroundColor White
+    Write-Host "  Exclude     - Services to exclude from starting" -ForegroundColor White
+    Write-Host "  Help        - Show this help message" -ForegroundColor White
     Write-Host ""
     Write-Host "Services:" -ForegroundColor Cyan
     foreach ($service in $AllServices) {
@@ -32,6 +38,8 @@ function Show-Help {
     Write-Host "  .\dev-start.ps1                                    # Start all services" -ForegroundColor White
     Write-Host "  .\dev-start.ps1 front_service sse_service         # Start specific services" -ForegroundColor White
     Write-Host "  .\dev-start.ps1 web_client                        # Start only web client" -ForegroundColor White
+    Write-Host "  .\dev-start.ps1 -Exclude web_client               # Start all except web client" -ForegroundColor White
+    Write-Host "  .\dev-start.ps1 -Exclude llm_worker,memory_worker # Start all except workers" -ForegroundColor White
 }
 
 if ($Help) {
@@ -65,9 +73,8 @@ function Test-Prerequisites {
         Write-ColorOutput "❌ uv not found. Please install uv package manager." "Error"
         exit 1
     }
-    
-    # Check if npm is installed (only if web_client is in services to start)
-    $needsNode = $Services.Count -eq 0 -or $Services -contains "web_client"
+      # Check if npm is installed (only if web_client is in services to start)
+    $needsNode = ($Services.Count -eq 0 -and $Exclude -notcontains "web_client") -or $Services -contains "web_client"
     if ($needsNode) {
         try {
             $npmVersion = npm --version 2>$null
@@ -171,11 +178,35 @@ Test-Prerequisites
 
 # Determine which services to start
 $servicesToStart = @()
+
+# Validate exclude services first
+if ($Exclude.Count -gt 0) {
+    foreach ($excludeName in $Exclude) {
+        $excludeConfig = $AllServices | Where-Object { $_.Name -eq $excludeName }
+        if (-not $excludeConfig) {
+            Write-ColorOutput "❌ Unknown service to exclude: $excludeName" "Error"
+            Write-ColorOutput "Available services: $($AllServices.Name -join ', ')" "Info"
+            exit 1
+        }
+    }
+}
+
 if ($Services.Count -eq 0) {
-    # Start all services
-    $servicesToStart = $AllServices
-    Write-ColorOutput "Starting all services..." "Info"
+    # Start all services except excluded ones
+    $servicesToStart = $AllServices | Where-Object { $_.Name -notin $Exclude }
+    if ($Exclude.Count -gt 0) {
+        Write-ColorOutput "Starting all services except: $($Exclude -join ', ')" "Info"
+    } else {
+        Write-ColorOutput "Starting all services..." "Info"
+    }
 } else {
+    # Start specific services, but check if any are in exclude list
+    $conflictingServices = $Services | Where-Object { $_ -in $Exclude }
+    if ($conflictingServices.Count -gt 0) {
+        Write-ColorOutput "❌ Cannot start and exclude the same services: $($conflictingServices -join ', ')" "Error"
+        exit 1
+    }
+    
     # Start specific services
     foreach ($serviceName in $Services) {
         $serviceConfig = $AllServices | Where-Object { $_.Name -eq $serviceName }
@@ -186,8 +217,13 @@ if ($Services.Count -eq 0) {
             Write-ColorOutput "Available services: $($AllServices.Name -join ', ')" "Info"
             exit 1
         }
-    }
-    Write-ColorOutput "Starting selected services: $($Services -join ', ')" "Info"
+    }    Write-ColorOutput "Starting selected services: $($Services -join ', ')" "Info"
+}
+
+# Check if we have any services to start
+if ($servicesToStart.Count -eq 0) {
+    Write-ColorOutput "❌ No services to start after applying exclusions." "Error"
+    exit 1
 }
 
 # Start all services
