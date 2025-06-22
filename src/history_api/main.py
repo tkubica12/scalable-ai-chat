@@ -150,7 +150,23 @@ async def health_check():
 
 @app.get("/conversations/{user_id}", response_model=List[Conversation])
 async def get_user_conversations(user_id: str, limit: int = 50):
-    """Get list of conversations for a user"""
+    """
+    Get list of conversations for a user.
+    
+    Args:
+        user_id: The user ID to get conversations for
+        limit: Maximum number of conversations to return
+        
+    Returns:
+        List[Conversation]: List of user's conversations
+    """
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.user_id", user_id)
+        current_span.set_attribute("app.operation", "get_user_conversations")
+        current_span.set_attribute("app.limit", limit)
+    
     logger.info(f"Getting conversations for user: {user_id}")
     
     conversations = get_user_conversations_from_cosmos(user_id, limit)
@@ -165,23 +181,51 @@ async def get_user_conversations(user_id: str, limit: int = 50):
             messageCount=conv.get('messageCount', 0)
         ))
     
+    # Add result metrics to span
+    if current_span.is_recording():
+        current_span.set_attribute("app.conversations_found", len(result))
+    
     logger.info(f"Found {len(result)} conversations for user {user_id}")
     return result
 
 @app.get("/conversations/{user_id}/{session_id}/messages", response_model=ConversationDetail)
 async def get_conversation_messages(user_id: str, session_id: str):
-    """Get all messages for a specific conversation"""
+    """
+    Get all messages for a specific conversation.
+    
+    Args:
+        user_id: The user ID who owns the conversation
+        session_id: The conversation session ID
+        
+    Returns:
+        ConversationDetail: Conversation with all messages
+        
+    Raises:
+        HTTPException: If conversation not found or access denied
+    """
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.user_id", user_id)
+        current_span.set_attribute("app.session_id", session_id)
+        current_span.set_attribute("app.operation", "get_conversation_messages")
+    
     logger.info(f"Getting messages for conversation {session_id} (user: {user_id})")
     
     # Get conversation data from Cosmos DB
     conversation_data = get_conversation_from_cosmos(session_id)
     
     if not conversation_data:
+        if current_span.is_recording():
+            current_span.set_attribute("app.error", "conversation_not_found")
         raise HTTPException(status_code=404, detail="Conversation not found")
     
     # Verify user owns this conversation
     if conversation_data.get('userId') != user_id:
+        if current_span.is_recording():
+            current_span.set_attribute("app.error", "access_denied")
         raise HTTPException(status_code=403, detail="Access denied")
+        
     messages = []
     for msg in conversation_data.get('messages', []):
         messages.append(Message(
@@ -190,6 +234,11 @@ async def get_conversation_messages(user_id: str, session_id: str):
             content=msg.get('content'),
             timestamp=msg.get('timestamp', '')
         ))
+    
+    # Add result metrics to span
+    if current_span.is_recording():
+        current_span.set_attribute("app.messages_found", len(messages))
+        current_span.set_attribute("app.conversation_title", conversation_data.get('title', ''))
     
     logger.info(f"Found {len(messages)} messages for conversation {session_id}")
     
@@ -202,23 +251,54 @@ async def get_conversation_messages(user_id: str, session_id: str):
 
 @app.put("/conversations/{user_id}/{session_id}/title")
 async def update_conversation_title(user_id: str, session_id: str, request: UpdateTitleRequest):
-    """Update conversation title"""
+    """
+    Update conversation title.
+    
+    Args:
+        user_id: The user ID who owns the conversation
+        session_id: The conversation session ID
+        request: The new title for the conversation
+        
+    Returns:
+        dict: Success confirmation
+        
+    Raises:
+        HTTPException: If conversation not found, access denied, or update fails
+    """
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.user_id", user_id)
+        current_span.set_attribute("app.session_id", session_id)
+        current_span.set_attribute("app.operation", "update_conversation_title")
+        current_span.set_attribute("app.new_title_length", len(request.title))
+    
     logger.info(f"Updating title for conversation {session_id} (user: {user_id}) to '{request.title}'")
     
     # Verify conversation exists and user owns it
     conversation_data = get_conversation_from_cosmos(session_id)
     
     if not conversation_data:
+        if current_span.is_recording():
+            current_span.set_attribute("app.error", "conversation_not_found")
         raise HTTPException(status_code=404, detail="Conversation not found")
     
     if conversation_data.get('userId') != user_id:
+        if current_span.is_recording():
+            current_span.set_attribute("app.error", "access_denied")
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Update title in Cosmos DB
     success = update_conversation_title_in_cosmos(session_id, request.title)
     
     if not success:
+        if current_span.is_recording():
+            current_span.set_attribute("app.error", "update_failed")
         raise HTTPException(status_code=500, detail="Failed to update conversation title")
+    
+    # Add success information to span
+    if current_span.is_recording():
+        current_span.set_attribute("app.title_update_success", True)
     
     logger.info(f"Successfully updated title for conversation {session_id}")
     return {"success": True, "message": "Title updated successfully"}

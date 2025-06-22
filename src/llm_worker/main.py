@@ -306,8 +306,17 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             # Depending on requirements, might dead-letter this message
             return
         
+        # Add custom dimensions to current span for observability
+        current_span = trace.get_current_span()
+        if current_span.is_recording():
+            current_span.set_attribute("app.user_id", user_id)
+            current_span.set_attribute("app.session_id", session_id)
+            current_span.set_attribute("app.chat_message_id", chat_message_id)
+            current_span.set_attribute("app.operation", "process_message")
+        
         logger.info(f"Processing chatMessageId: {chat_message_id} for sessionId: {session_id}, userId: {user_id} - Text: '{user_text}'")
-          # Get conversation history from Redis
+        
+        # Get conversation history from Redis
         conversation_history = await get_conversation_history(session_id, user_id)
         
         # Build messages for LLM

@@ -464,13 +464,26 @@ async def get_conversation_from_redis(session_id: str) -> dict:
 async def process_completed_message(message_body: dict):
     """
     Process a completed message and extract/store memories.
+    
+    Args:
+        message_body: Dictionary containing the completed message data
     """
-    with tracer.start_as_current_span("process_completed_message"):
+    with tracer.start_as_current_span("process_completed_message") as span:
         try:
             session_id = message_body.get("sessionId")
             user_id = message_body.get("userId")
+            chat_message_id = message_body.get("chatMessageId")
+            
+            # Add custom dimensions to span for observability
+            if span.is_recording():
+                span.set_attribute("app.user_id", user_id or "unknown")
+                span.set_attribute("app.session_id", session_id or "unknown")
+                span.set_attribute("app.chat_message_id", chat_message_id or "unknown")
+                span.set_attribute("app.operation", "process_completed_message")
             
             if not session_id or not user_id:
+                if span.is_recording():
+                    span.set_attribute("app.error", "missing_required_fields")
                 logger.error(f"Missing sessionId or userId in message: {message_body}")
                 return
             
@@ -479,8 +492,15 @@ async def process_completed_message(message_body: dict):
             # Fetch conversation data from Redis
             conversation_data = await get_conversation_from_redis(session_id)
             if not conversation_data:
+                if span.is_recording():
+                    span.set_attribute("app.error", "conversation_not_found")
                 logger.error(f"No conversation data found for session {session_id}")
                 return
+            
+            # Add conversation metrics to span
+            if span.is_recording():
+                messages = conversation_data.get("messages", [])
+                span.set_attribute("app.message_count", len(messages))
             
             # Extract conversation summary and metadata
             analysis = await extract_conversation_summary(conversation_data)
@@ -497,8 +517,16 @@ async def process_completed_message(message_body: dict):
             # Update user memory if there are changes
             if memory_updates:
                 await update_user_memory(user_id, memory_updates)
+                
+                # Add memory update metrics to span
+                if span.is_recording():
+                    span.set_attribute("app.memory_updates_applied", True)
+                    span.set_attribute("app.memory_update_categories", list(memory_updates.keys()))
+                    
                 logger.info(f"Extracted memory updates for user {user_id}: {list(memory_updates.keys())}")
             else:
+                if span.is_recording():
+                    span.set_attribute("app.memory_updates_applied", False)
                 logger.info(f"No new memory information found for user {user_id}")
                 
         except Exception as e:

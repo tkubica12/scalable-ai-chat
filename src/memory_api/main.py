@@ -175,8 +175,25 @@ async def health_check():
 
 @app.get("/api/memory/users/{user_id}/memories", response_model=UserMemory)
 async def get_user_memories(user_id: str):
-    """Retrieve structured memories for a specific user."""
+    """
+    Retrieve structured memories for a specific user.
+    
+    Args:
+        user_id: The user ID to get memories for
+        
+    Returns:
+        UserMemory: User's structured memories
+        
+    Raises:
+        HTTPException: If retrieval fails
+    """
     with tracer.start_as_current_span("get_user_memories"):
+        # Add custom dimensions to current span for observability
+        current_span = trace.get_current_span()
+        if current_span.is_recording():
+            current_span.set_attribute("app.user_id", user_id)
+            current_span.set_attribute("app.operation", "get_user_memories")
+        
         try:
             # Query user memories
             query = "SELECT * FROM c WHERE c.userId = @userId"
@@ -187,16 +204,25 @@ async def get_user_memories(user_id: str):
             ))
             
             if not items:
+                # Add result information to span
+                if current_span.is_recording():
+                    current_span.set_attribute("app.memories_found", False)
                 # Return empty user memory structure
                 return UserMemory(
                     userId=user_id,
                     last_updated=datetime.now(timezone.utc)
                 )
             
+            # Add result information to span
+            if current_span.is_recording():
+                current_span.set_attribute("app.memories_found", True)
+            
             memory_data = items[0]
             return UserMemory(**memory_data)
             
         except exceptions.CosmosHttpResponseError as e:
+            if current_span.is_recording():
+                current_span.set_attribute("app.error", "cosmos_error")
             logger.error(f"Error retrieving user memories for {user_id}: {e}")
             raise HTTPException(status_code=500, detail="Failed to retrieve user memories")
 
@@ -235,13 +261,37 @@ async def delete_user_memories(user_id: str):
 
 @app.post("/api/memory/users/{user_id}/conversations/search", response_model=List[MemorySearchResult])
 async def search_conversation_memories(user_id: str, search_request: MemorySearchRequest):
-    """Search conversational memories for a specific user."""
+    """
+    Search conversational memories for a specific user.
+    
+    Args:
+        user_id: The user ID to search memories for
+        search_request: Search query and parameters
+        
+    Returns:
+        List[MemorySearchResult]: Matching conversation memories
+        
+    Raises:
+        HTTPException: If search fails
+    """
     with tracer.start_as_current_span("search_conversation_memories"):
+        # Add custom dimensions to current span for observability
+        current_span = trace.get_current_span()
+        if current_span.is_recording():
+            current_span.set_attribute("app.user_id", user_id)
+            current_span.set_attribute("app.operation", "search_conversation_memories")
+            current_span.set_attribute("app.search_query", search_request.query)
+            current_span.set_attribute("app.search_limit", search_request.limit)
+        
         try:
             # Generate embedding for the search query
             query_embedding = await generate_embedding(search_request.query)
             
             if query_embedding:
+                # Add embedding information to span
+                if current_span.is_recording():
+                    current_span.set_attribute("app.search_method", "vector_similarity")
+                    
                 # Use CosmosDB vector similarity search if embeddings are available
                 query = """
                     SELECT c.sessionId, c.summary, c.timestamp, c.themes, c.persons, 
@@ -263,6 +313,10 @@ async def search_conversation_memories(user_id: str, search_request: MemorySearc
                     enable_cross_partition_query=True
                 ))
             else:
+                # Add fallback information to span
+                if current_span.is_recording():
+                    current_span.set_attribute("app.search_method", "text_based")
+                    
                 # Fallback to text-based search
                 query = """
                     SELECT c.sessionId, c.summary, c.timestamp, c.themes, c.persons, 

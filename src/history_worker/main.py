@@ -218,39 +218,71 @@ async def persist_conversation_to_cosmos(conversation_data: dict):
 async def process_message_completed_event(sb_client: ServiceBusClient, service_bus_message):
     """
     Process a message-completed event: fetch conversation from Redis and persist to Cosmos DB.
+    
+    Args:
+        sb_client: Service Bus client
+        service_bus_message: Message from Service Bus containing completion event
     """
-    try:
-        message_body_str = str(service_bus_message)
-        logger.info(f"Received message-completed event: {message_body_str}")
-        message_data = json.loads(message_body_str)
-        
-        session_id = message_data.get("sessionId")
-        user_id = message_data.get("userId")
-        chat_message_id = message_data.get("chatMessageId")
-        
-        if not session_id:
-            logger.error(f"Message missing required sessionId: {message_data}")
-            raise ValueError(f"Message missing required sessionId: {message_data}")
-        
-        logger.info(f"Processing message-completed event for session {session_id}, user {user_id}, chatMessage {chat_message_id}")
-        
-        # Fetch conversation data from Redis
-        conversation_data = await fetch_conversation_from_redis(session_id)
-        
-        if not conversation_data:
-            logger.warning(f"Could not fetch conversation data for session {session_id}")
-            raise Exception(f"Could not fetch conversation data for session {session_id}")
-        
-        # Persist to Cosmos DB
-        await persist_conversation_to_cosmos(conversation_data)
-        logger.info(f"Successfully processed message-completed event for session {session_id}")
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing message body as JSON: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error processing message-completed event: {e}")
-        raise
+    # Start a new span for message processing
+    with tracer.start_as_current_span("process_message_completed") as span:
+        try:
+            message_body_str = str(service_bus_message)
+            logger.info(f"Received message-completed event: {message_body_str}")
+            message_data = json.loads(message_body_str)
+            
+            session_id = message_data.get("sessionId")
+            user_id = message_data.get("userId")
+            chat_message_id = message_data.get("chatMessageId")
+            
+            # Add custom dimensions to span for observability
+            if span.is_recording():
+                span.set_attribute("app.user_id", user_id or "unknown")
+                span.set_attribute("app.session_id", session_id or "unknown")
+                span.set_attribute("app.chat_message_id", chat_message_id or "unknown")
+                span.set_attribute("app.operation", "process_message_completed")
+            
+            if not session_id:
+                if span.is_recording():
+                    span.set_attribute("app.error", "missing_session_id")
+                logger.error(f"Message missing required sessionId: {message_data}")
+                raise ValueError(f"Message missing required sessionId: {message_data}")
+            
+            logger.info(f"Processing message-completed event for session {session_id}, user {user_id}, chatMessage {chat_message_id}")
+            
+            # Fetch conversation data from Redis
+            conversation_data = await fetch_conversation_from_redis(session_id)
+            
+            if not conversation_data:
+                if span.is_recording():
+                    span.set_attribute("app.error", "conversation_not_found_in_redis")
+                logger.warning(f"Could not fetch conversation data for session {session_id}")
+                raise Exception(f"Could not fetch conversation data for session {session_id}")
+            
+            # Add conversation metrics to span
+            if span.is_recording():
+                messages = conversation_data.get("messages", [])
+                span.set_attribute("app.message_count", len(messages))
+                span.set_attribute("app.has_title", bool(conversation_data.get("title")))
+            
+            # Persist to Cosmos DB
+            await persist_conversation_to_cosmos(conversation_data)
+            
+            # Add success information to span
+            if span.is_recording():
+                span.set_attribute("app.persistence_success", True)
+                
+            logger.info(f"Successfully processed message-completed event for session {session_id}")
+            
+        except json.JSONDecodeError as e:
+            if span.is_recording():
+                span.set_attribute("app.error", "json_decode_error")
+            logger.error(f"Error parsing message body as JSON: {e}")
+            raise
+        except Exception as e:
+            if span.is_recording():
+                span.set_attribute("app.error", "processing_error")
+            logger.error(f"Error processing message-completed event: {e}")
+            raise
 
 
 async def _process_and_handle_message(sb_client: ServiceBusClient, msg: ServiceBusMessage, receiver, semaphore: asyncio.Semaphore, logger_instance: logging.Logger):

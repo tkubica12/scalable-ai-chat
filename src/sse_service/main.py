@@ -157,13 +157,24 @@ async def stream_tokens(sessionId: str, chatMessageId: str, request: Request):
     Args:
         sessionId: The session identifier
         chatMessageId: The specific chat message identifier
+        request: FastAPI request object
     
     Returns:
         StreamingResponse: SSE stream of tokens
+        
+    Raises:
+        HTTPException: If Service Bus client not initialized
     """
     global sb_client
     if not sb_client:
         raise HTTPException(status_code=503, detail="Service Bus client not initialized.")
+
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.session_id", sessionId)
+        current_span.set_attribute("app.chat_message_id", chatMessageId)
+        current_span.set_attribute("app.operation", "stream_tokens")
 
     logger.info(f"Starting SSE stream for session: {sessionId}, chatMessageId: {chatMessageId}")
 

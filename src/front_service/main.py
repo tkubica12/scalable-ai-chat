@@ -138,17 +138,57 @@ class SessionStartResponse(BaseModel):
 
 @app.post("/api/session/start", response_model=SessionStartResponse)
 async def start_session(session_request: SessionStartRequest):
+    """
+    Start a new chat session for a user.
+    
+    Args:
+        session_request: Contains the user ID for the session
+        
+    Returns:
+        SessionStartResponse: Contains the generated session ID
+    """
     sessionId = str(uuid.uuid4())
+    
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.user_id", session_request.userId)
+        current_span.set_attribute("app.session_id", sessionId)
+        current_span.set_attribute("app.operation", "session_start")
+    
     logger.info(f"New session started: {sessionId} for user: {session_request.userId}")
     return SessionStartResponse(sessionId=sessionId)
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(chat_message: ChatMessage, request: Request):
+    """
+    Process a chat message by sending it to the Service Bus topic.
+    
+    Args:
+        chat_message: The chat message to process
+        request: FastAPI request object
+        
+    Returns:
+        ChatResponse: Confirmation of message processing
+        
+    Raises:
+        HTTPException: If Service Bus is not available or message sending fails
+    """
     global sb_client, sender_pool
     if not sb_client:
         raise HTTPException(status_code=503, detail="Service Bus client not initialized.")
     if not sender_pool:
         raise HTTPException(status_code=503, detail="Service Bus sender pool not initialized.")    
+    
+    # Add custom dimensions to current span for observability
+    current_span = trace.get_current_span()
+    if current_span.is_recording():
+        current_span.set_attribute("app.user_id", chat_message.userId)
+        current_span.set_attribute("app.session_id", chat_message.sessionId)
+        current_span.set_attribute("app.chat_message_id", chat_message.chatMessageId)
+        current_span.set_attribute("app.operation", "chat_message")
+        current_span.set_attribute("app.message_length", len(chat_message.message))
+    
     logger.info(f"Received message: '{chat_message.message}' for session: {chat_message.sessionId}, chatMessageId: {chat_message.chatMessageId}, userId: {chat_message.userId}")
 
     try:
@@ -170,6 +210,11 @@ async def chat_endpoint(chat_message: ChatMessage, request: Request):
         finally:
             # Return sender to pool
             await sender_pool.put((sender, lock))
+        
+        # Add success information to span
+        if current_span.is_recording():
+            current_span.set_attribute("app.servicebus_send_success", True)
+            
         logger.info(f"Message {chat_message.chatMessageId} for session {chat_message.sessionId} sent to topic '{SERVICEBUS_USER_MESSAGES_TOPIC}'")
         
         return ChatResponse(
@@ -179,6 +224,11 @@ async def chat_endpoint(chat_message: ChatMessage, request: Request):
         )
         
     except Exception as e:
+        # Add error information to span
+        if current_span.is_recording():
+            current_span.set_attribute("app.servicebus_send_success", False)
+            current_span.set_attribute("app.error_message", str(e))
+            
         logger.error(f"Failed to send message to Service Bus for session {chat_message.sessionId}, chatMessageId {chat_message.chatMessageId}: {e}")
         raise HTTPException(status_code=500, detail="Failed to process message.")
 
