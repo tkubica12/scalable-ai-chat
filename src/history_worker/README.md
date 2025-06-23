@@ -102,6 +102,34 @@ Ensure the service's managed identity has appropriate RBAC permissions:
 - `Redis Data Contributor` role on the Redis cache
 - `Cognitive Services User` role on the AI service
 
+## Tracing and Observability
+
+This service implements comprehensive OpenTelemetry tracing with **automatic application-specific attributes** on all spans:
+
+### Custom Span Processor
+
+The service includes a custom OpenTelemetry span processor (`AppAttributesSpanProcessor`) that automatically adds these attributes to **every span** created during message processing:
+
+- `app.user_id`: User ID from the current message context
+- `app.session_id`: Session ID from the current message context  
+- `app.chat_message_id`: Message ID from the current message context
+- `app.name`: "history-worker" (service identifier)
+
+### Benefits
+
+1. **Automatic Attribution**: All spans (including those from Azure SDKs) get application context
+2. **Consistent Tracking**: No need to manually add attributes to every span
+3. **Azure SDK Integration**: Cosmos DB, Redis, Service Bus, and AI inference calls are automatically tagged
+4. **Easy Filtering**: Query Application Insights by user, session, or message ID across all operations
+
+### Implementation Details
+
+- Uses Python `contextvars` for async-safe context propagation
+- Context variables are set at the start of each message processing operation
+- All subsequent spans within that async context inherit the attributes
+- Custom processor integrates with Azure Monitor's OpenTelemetry configuration
+
+
 ## Conversation Title Generation
 
 The service automatically generates conversation titles when they don't exist:

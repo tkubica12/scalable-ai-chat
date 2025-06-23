@@ -1,0 +1,78 @@
+// Map user_id, session_id and chat_message_id from customDimensions
+let mapping = requests
+| where customDimensions contains "app.user_id" and customDimensions contains "app.session_id" and customDimensions contains "app.chat_message_id"
+| project user_id = customDimensions["app.user_id"], session_id = customDimensions["app.session_id"], chat_message_id = customDimensions["app.chat_message_id"], operation_Id;
+
+// Non-streaming LLM calls
+let nonStreamingCalls = dependencies
+| where name == "chat" and type == "az.ai.inference" and customDimensions contains "gen_ai.usage." 
+| project customDimensions, operation_Id, cloud_RoleName, cloud_RoleInstance, duration;
+
+// Non-streaming LLM calls enhanced with mapping
+let enhancedNonStreamingCalls = nonStreamingCalls
+| join kind=inner mapping on operation_Id
+| extend 
+    model = customDimensions["gen_ai.request.model"],
+    prompt_tokens = toint(customDimensions["gen_ai.usage.prompt_tokens"]),
+    completion_tokens = toint(customDimensions["gen_ai.usage.completion_tokens"]),
+    total_tokens = toint(customDimensions["gen_ai.usage.total_tokens"]),
+    temperature = todouble(customDimensions["gen_ai.request.temperature"]),
+    max_tokens = toint(customDimensions["gen_ai.request.max_tokens"])
+| project 
+    timestamp, 
+    user_id, 
+    session_id, 
+    chat_message_id,
+    model,
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    temperature,
+    max_tokens,
+    duration,
+    cloud_RoleName,
+    cloud_RoleInstance,
+    operation_Id;
+
+// Streaming LLM calls (if any)
+let streamingCalls = dependencies
+| where name == "chat" and type == "az.ai.inference" and customDimensions contains "gen_ai.usage." and customDimensions contains "streaming"
+| join kind=inner mapping on operation_Id
+| extend 
+    model = customDimensions["gen_ai.request.model"],
+    prompt_tokens = toint(customDimensions["gen_ai.usage.prompt_tokens"]),
+    completion_tokens = toint(customDimensions["gen_ai.usage.completion_tokens"]),
+    total_tokens = toint(customDimensions["gen_ai.usage.total_tokens"])
+| project 
+    timestamp, 
+    user_id, 
+    session_id, 
+    chat_message_id,
+    model,
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    duration,
+    cloud_RoleName,
+    cloud_RoleInstance,
+    operation_Id;
+
+// Union all LLM calls
+let allLLMCalls = enhancedNonStreamingCalls
+| union streamingCalls;
+
+// Final analysis - Token usage summary by user and session
+allLLMCalls
+| summarize 
+    total_requests = count(),
+    total_prompt_tokens = sum(prompt_tokens),
+    total_completion_tokens = sum(completion_tokens),
+    total_tokens_used = sum(total_tokens),
+    avg_duration_ms = avg(duration),
+    min_duration_ms = min(duration),
+    max_duration_ms = max(duration),
+    models_used = make_set(model),
+    first_request = min(timestamp),
+    last_request = max(timestamp)
+by user_id, session_id
+| order by total_tokens_used desc

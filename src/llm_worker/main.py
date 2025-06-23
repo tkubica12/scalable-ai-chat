@@ -1,3 +1,26 @@
+"""
+LLM Worker Service
+
+This service processes user messages from Azure Service Bus, generates responses using Azure AI 
+inference, and streams results back through Service Bus for real-time chat experiences.
+
+TRACING AND OBSERVABILITY:
+This service implements custom OpenTelemetry tracing with application-specific attributes.
+All spans created by this application automatically include:
+- app.user_id: The user ID from the current context
+- app.session_id: The session ID from the current context  
+- app.chat_message_id: The message ID from the current context
+- app.name: "llm-worker" (service identifier)
+
+These attributes are automatically added to ALL spans (including spans created by Azure SDKs
+like Redis, Service Bus, and AI inference calls) through a custom SpanProcessor.
+
+Usage:
+1. Set context at the start of an operation using set_context_attributes()
+2. All subsequent spans within that async context will inherit these attributes
+3. Context variables use Python's contextvars for proper async isolation
+"""
+
 import os
 import json
 import asyncio
@@ -5,6 +28,7 @@ import logging
 import signal
 import sys
 import aiohttp
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -13,6 +37,7 @@ from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 from azure.monitor.opentelemetry import configure_azure_monitor
 from opentelemetry import trace
+from opentelemetry.sdk.trace.export import SpanProcessor
 from azure.ai.inference.aio import ChatCompletionsClient  # async client for streaming
 from azure.ai.inference.models import SystemMessage, UserMessage, AssistantMessage, ToolMessage, ChatCompletionsToolDefinition
 from azure.core.pipeline.transport import AioHttpTransport # Existing import
@@ -23,6 +48,89 @@ from jinja2 import Environment, FileSystemLoader
 
 # Load .env in development
 load_dotenv()
+
+# Context variables for storing application-specific information across spans
+current_user_id: ContextVar[str] = ContextVar('current_user_id', default=None)
+current_session_id: ContextVar[str] = ContextVar('current_session_id', default=None)
+current_message_id: ContextVar[str] = ContextVar('current_message_id', default=None)
+
+
+def set_context_attributes(user_id: str = None, session_id: str = None, message_id: str = None):
+    """
+    Helper function to set context variables for tracing.
+    
+    Args:
+        user_id: User ID to set in context
+        session_id: Session ID to set in context  
+        message_id: Message ID to set in context
+    """
+    if user_id is not None:
+        current_user_id.set(user_id)
+    if session_id is not None:
+        current_session_id.set(session_id)
+    if message_id is not None:
+        current_message_id.set(message_id)
+
+
+def clear_context_attributes():
+    """
+    Clear all context variables.
+    """
+    current_user_id.set(None)
+    current_session_id.set(None)
+    current_message_id.set(None)
+
+
+class AppAttributesSpanProcessor(SpanProcessor):
+    """
+    Custom span processor that adds application-specific attributes to all spans.
+    
+    This processor automatically adds user_id, session_id, and message_id attributes
+    to every span created by this application, pulling the values from context variables.
+    """
+    
+    def on_start(self, span, parent_context=None):
+        """
+        Called when a span is started. Adds application-specific attributes.
+        
+        Args:
+            span: The span that was started
+            parent_context: The parent context of the span
+        """
+        try:
+            # Add user_id if available in context
+            user_id = current_user_id.get()
+            if user_id:
+                span.set_attribute("app.user_id", user_id)
+            
+            # Add session_id if available in context
+            session_id = current_session_id.get()
+            if session_id:
+                span.set_attribute("app.session_id", session_id)
+            
+            # Add message_id if available in context
+            message_id = current_message_id.get()
+            if message_id:
+                span.set_attribute("app.chat_message_id", message_id)
+                
+            # Add application name for easier filtering
+            span.set_attribute("app.name", "llm-worker")
+            
+        except Exception as e:
+            # Don't fail span creation if attribute setting fails
+            logger.warning(f"Failed to add application attributes to span: {e}")
+    
+    def on_end(self, span):
+        """Called when a span is ended. No action needed for our use case."""
+        pass
+    
+    def shutdown(self):
+        """Called when the processor is shut down. No action needed for our use case."""
+        pass
+    
+    def force_flush(self, timeout_millis=30000):
+        """Called to force flush any pending spans. No action needed for our use case."""
+        pass
 
 
 # Service Bus and concurrency configuration
@@ -62,6 +170,16 @@ configure_azure_monitor(
         "urllib3": {"enabled": False},
     }
 )
+
+# Add our custom span processor to the global tracer provider
+tracer_provider = trace.get_tracer_provider()
+if hasattr(tracer_provider, 'add_span_processor'):
+    app_attributes_processor = AppAttributesSpanProcessor()
+    tracer_provider.add_span_processor(app_attributes_processor)
+    logger.info("Custom span processor for application attributes added successfully")
+else:
+    logger.warning("Could not add custom span processor - tracer provider doesn't support it")
+
 tracer = trace.get_tracer(__name__)
 
 
@@ -306,59 +424,67 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             # Depending on requirements, might dead-letter this message
             return
         
-        # Add custom dimensions to current span for observability
-        current_span = trace.get_current_span()
-        if current_span.is_recording():
-            current_span.set_attribute("app.user_id", user_id)
-            current_span.set_attribute("app.session_id", session_id)
-            current_span.set_attribute("app.chat_message_id", chat_message_id)
-            current_span.set_attribute("app.operation", "process_message")
-        
-        logger.info(f"Processing chatMessageId: {chat_message_id} for sessionId: {session_id}, userId: {user_id} - Text: '{user_text}'")
-        
-        # Get conversation history from Redis
-        conversation_history = await get_conversation_history(session_id, user_id)
-        
-        # Build messages for LLM
-        messages = []
-        
-        # Check if history already starts with a SystemMessage
-        has_system_message_in_history = (
-            conversation_history and 
-            len(conversation_history) > 0 and 
-            isinstance(conversation_history[0], SystemMessage)
+        # Set context variables so all spans in this operation will include these attributes
+        set_context_attributes(
+            user_id=user_id or "unknown",
+            session_id=session_id,
+            message_id=chat_message_id
         )
-        if not has_system_message_in_history:
-            # This is a new conversation, fetch user memory and generate system prompt
-            logger.debug("New conversation detected, fetching user memory for system prompt")
-            user_memory = await fetch_user_memory(user_id)
-            logger.debug(f"Fetched user memory for user {user_id}: {json.dumps(user_memory, indent=2, default=str) if user_memory else 'Empty'}")
-            system_message_content = generate_system_prompt(user_memory)
+        
+        # Start a new span for message processing - it will automatically get the context attributes
+        with tracer.start_as_current_span("process_user_message") as span:
+            # Add operation-specific attributes manually
+            if span.is_recording():
+                span.set_attribute("app.operation", "process_user_message")
+                span.set_attribute("app.user_text_length", len(user_text))
             
-            # Add system message with memory context
-            messages.append(SystemMessage(system_message_content))
-            logger.debug("Added system message with user memory context")
-        else:
-            logger.debug("System message already present in conversation history")
-            system_message_content = None  # Don't store system message for existing conversations
-        
-        # Add conversation history if available
-        if conversation_history:
-            messages.extend(conversation_history)        # Add current user message
-        messages.append(UserMessage(user_text))
-        logger.debug(f"Built messages for LLM: {len(messages)} total messages")
-          # Debug: Log the complete messages array as JSON
-        logger.debug(f"Messages sent to LLM: {json.dumps(messages, indent=2, default=str)}")
-        
-        logger.info(f"Calling LLM with {len(messages)} messages (including system message and history)")
+            logger.info(f"Processing chatMessageId: {chat_message_id} for sessionId: {session_id}, userId: {user_id} - Text: '{user_text}'")
+            
+            # Get conversation history from Redis
+            conversation_history = await get_conversation_history(session_id, user_id)
+            
+            # Build messages for LLM
+            messages = []
+              # Check if history already starts with a SystemMessage
+            has_system_message_in_history = (
+                conversation_history and 
+                len(conversation_history) > 0 and 
+                isinstance(conversation_history[0], SystemMessage)
+            )
+            
+            if not has_system_message_in_history:
+                # This is a new conversation, fetch user memory and generate system prompt
+                logger.debug("New conversation detected, fetching user memory for system prompt")
+                user_memory = await fetch_user_memory(user_id)
+                logger.debug(f"Fetched user memory for user {user_id}: {json.dumps(user_memory, indent=2, default=str) if user_memory else 'Empty'}")
+                system_message_content = generate_system_prompt(user_memory)
+                
+                # Add system message with memory context
+                messages.append(SystemMessage(system_message_content))
+                logger.debug("Added system message with user memory context")
+            else:
+                logger.debug("System message already present in conversation history")
+                system_message_content = None  # Don't store system message for existing conversations
+            
+            # Add conversation history if available
+            if conversation_history:
+                messages.extend(conversation_history)
+            
+            # Add current user message
+            messages.append(UserMessage(user_text))
+            logger.debug(f"Built messages for LLM: {len(messages)} total messages")
+            # Debug: Log the complete messages array as JSON
+            logger.debug(f"Messages sent to LLM: {json.dumps(messages, indent=2, default=str)}")
+            
+            logger.info(f"Calling LLM with {len(messages)} messages (including system message and history)")
 
-        # Call Azure AI Inference SDK for chat completions with streaming and tools
-        stream = await chat_client.complete(
-            stream=True, 
-            messages=messages,
-            tools=[conversation_search_tool],
-            tool_choice="auto"
-        )
+            # Call Azure AI Inference SDK for chat completions with streaming and tools
+            stream = await chat_client.complete(
+                stream=True, 
+                messages=messages,
+                tools=[conversation_search_tool],
+                tool_choice="auto"
+            )
         # Collect the full assistant response and handle function calls
         assistant_response_tokens = []
         function_calls = {} 
@@ -536,14 +662,23 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             chat_message_id,
             system_msg_to_store
         )
-        
-        # Publish message-completed event for downstream processing (history, memory, etc.)
+          # Publish message-completed event for downstream processing (history, memory, etc.)
         await publish_message_completed_event(sb_client, session_id, user_id, chat_message_id)
 
     except json.JSONDecodeError as e:
+        # Create an error span that will also get context attributes
+        with tracer.start_as_current_span("process_message_json_error") as error_span:
+            if error_span.is_recording():
+                error_span.set_attribute("app.error", "json_decode_error")
+                error_span.set_attribute("app.operation", "process_message")
         logger.error(f"Failed to decode JSON from user message: {message_body_str}, error: {e}")
         # Potentially dead-letter the message
     except Exception as e:
+        # Create an error span that will also get context attributes
+        with tracer.start_as_current_span("process_message_error") as error_span:
+            if error_span.is_recording():
+                error_span.set_attribute("app.error", "processing_error")
+                error_span.set_attribute("app.operation", "process_message")
         logger.error(f"Error processing message (id: {service_bus_message.message_id if service_bus_message else 'N/A'}): {e}")
         # Potentially re-raise or handle to allow the message to be abandoned/dead-lettered by the caller
         raise
@@ -553,15 +688,31 @@ async def _process_and_handle_message(sb_client: ServiceBusClient, msg: ServiceB
     Process a message, settle it, and release the concurrency semaphore.
     """
     try:
-        await process_message(sb_client, msg)
+        # Process the message within a span that will get application attributes
+        with tracer.start_as_current_span("handle_service_bus_message") as handle_span:
+            if handle_span.is_recording():
+                handle_span.set_attribute("app.message_id", msg.message_id)
+                handle_span.set_attribute("app.operation", "handle_service_bus_message")
+            
+            # Process the message - this will set context variables and create child spans
+            await process_message(sb_client, msg)
+            
         await receiver.complete_message(msg) # Reverted to use receiver.complete_message()
         logger_instance.info(f"Successfully processed and completed message id: {msg.message_id}")
     except Exception as e:
         logger_instance.error(f"Unhandled exception during message processing for msg_id {msg.message_id}. Error: {e}. Abandoning message.")
-        try:
-            await receiver.abandon_message(msg) # Reverted to use receiver.abandon_message()
-        except Exception as abandon_e:
-            logger_instance.error(f"Failed to abandon message {msg.message_id}. Error: {abandon_e}")
+        
+        # Create an error span that will also get context attributes if they were set
+        with tracer.start_as_current_span("handle_service_bus_message_error") as error_span:
+            if error_span.is_recording():
+                error_span.set_attribute("app.message_id", msg.message_id)
+                error_span.set_attribute("app.operation", "handle_service_bus_message_error")
+                error_span.set_attribute("app.error", str(e))
+            
+            try:
+                await receiver.abandon_message(msg) # Reverted to use receiver.abandon_message()
+            except Exception as abandon_e:
+                logger_instance.error(f"Failed to abandon message {msg.message_id}. Error: {abandon_e}")
     finally:
         semaphore.release()
 
