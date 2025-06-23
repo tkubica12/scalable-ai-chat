@@ -3,9 +3,13 @@ resource "azapi_resource" "history_worker" {
   name      = "ca-historyworker-${local.base_name}"
   location  = azurerm_resource_group.main.location
   parent_id = azurerm_resource_group.main.id
+
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.history_worker.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -22,6 +26,10 @@ resource "azapi_resource" "history_worker" {
               memory = "0.5Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.history_worker.client_id
+              },
               {
                 name  = "SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"
                 value = "${azurerm_servicebus_namespace.main.name}.servicebus.windows.net"
@@ -76,7 +84,8 @@ resource "azapi_resource" "history_worker" {
               {
                 name  = "AZURE_AI_CHAT_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
-            }]
+              }
+            ]
           }
         ]
         scale = {
@@ -94,7 +103,7 @@ resource "azapi_resource" "history_worker" {
                   namespace        = azurerm_servicebus_namespace.main.name
                   messageCount     = "5"
                 },
-                identity = "system"
+                identity = azurerm_user_assigned_identity.history_worker.id
               }
             }
           ]

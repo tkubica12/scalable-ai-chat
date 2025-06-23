@@ -3,9 +3,13 @@ resource "azapi_resource" "memory_api" {
   name      = "ca-memoryapi-${local.base_name}"
   location  = azurerm_resource_group.main.location
   parent_id = azurerm_resource_group.main.id
+
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.memory_api.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -34,6 +38,10 @@ resource "azapi_resource" "memory_api" {
               memory = "0.5Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.memory_api.client_id
+              },
               {
                 name  = "COSMOS_ENDPOINT"
                 value = azurerm_cosmosdb_account.main.endpoint
@@ -73,7 +81,8 @@ resource "azapi_resource" "memory_api" {
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "memory-api"
-            }]
+              }
+            ]
           }
         ]
         scale = {

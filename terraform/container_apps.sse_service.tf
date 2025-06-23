@@ -6,7 +6,10 @@ resource "azapi_resource" "sse_service" {
 
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.sse_service.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -24,20 +27,21 @@ resource "azapi_resource" "sse_service" {
           ]
         }
       }
-      template = { scale = {
-        cooldownPeriod = var.container_app_cooldown_period
-        minReplicas    = var.container_app_min_replicas
-        maxReplicas    = 10
-        rules = [
-          {
-            name = "http-scale-rule"
-            http = {
-              metadata = {
-                concurrentRequests = "20"
+      template = {
+        scale = {
+          cooldownPeriod = var.container_app_cooldown_period
+          minReplicas    = var.container_app_min_replicas
+          maxReplicas    = 10
+          rules = [
+            {
+              name = "http-scale-rule"
+              http = {
+                metadata = {
+                  concurrentRequests = "20"
+                }
               }
             }
-          }
-        ]
+          ]
         }
         containers = [
           {
@@ -48,6 +52,10 @@ resource "azapi_resource" "sse_service" {
               memory = "1Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.sse_service.client_id
+              },
               {
                 name  = "SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"
                 value = "${azurerm_servicebus_namespace.main.name}.servicebus.windows.net"

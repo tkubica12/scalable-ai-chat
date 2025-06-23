@@ -6,7 +6,10 @@ resource "azapi_resource" "front_service" {
 
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.front_service.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -48,6 +51,10 @@ resource "azapi_resource" "front_service" {
               memory = "1Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.front_service.client_id
+              },
               {
                 name  = "SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"
                 value = "${azurerm_servicebus_namespace.main.name}.servicebus.windows.net"

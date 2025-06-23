@@ -20,7 +20,7 @@ resource "azapi_resource" "redis_access_history_worker" {
     properties = {
       accessPolicyName = "default"
       user = {
-        objectId = azapi_resource.history_worker.output.identity.principalId
+        objectId = azurerm_user_assigned_identity.history_worker.principal_id
       }
     }
   }
@@ -34,7 +34,7 @@ resource "azapi_resource" "redis_access_memory_worker" {
     properties = {
       accessPolicyName = "default"
       user = {
-        objectId = azapi_resource.memory_worker.output.identity.principalId
+        objectId = azurerm_user_assigned_identity.memory_worker.principal_id
       }
     }
   }
@@ -48,7 +48,7 @@ resource "azapi_resource" "redis_access_llm_worker" {
     properties = {
       accessPolicyName = "default"
       user = {
-        objectId = azapi_resource.llm_worker.output.identity.principalId
+        objectId = azurerm_user_assigned_identity.llm_worker.principal_id
       }
     }
   }

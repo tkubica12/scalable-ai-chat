@@ -3,9 +3,13 @@ resource "azapi_resource" "memory_worker" {
   name      = "ca-memoryworker-${local.base_name}"
   location  = azurerm_resource_group.main.location
   parent_id = azurerm_resource_group.main.id
+
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.memory_worker.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -22,6 +26,10 @@ resource "azapi_resource" "memory_worker" {
               memory = "0.5Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.memory_worker.client_id
+              },
               {
                 name  = "SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"
                 value = "${azurerm_servicebus_namespace.main.name}.servicebus.windows.net"
@@ -53,10 +61,10 @@ resource "azapi_resource" "memory_worker" {
               {
                 name  = "REDIS_HOST"
                 value = azapi_resource.redis.output.properties.hostName
+                }, {
+                name  = "REDIS_PORT"
+                value = "10000"
               },
-              {
-                name = "REDIS_PORT"
-              value = "10000" },
               {
                 name  = "REDIS_SSL"
                 value = "true"
@@ -76,18 +84,18 @@ resource "azapi_resource" "memory_worker" {
               {
                 name  = "LOG_LEVEL"
                 value = "INFO"
-              },
-              {
+                }, {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
-              },              {
-                name  = "OTEL_SERVICE_NAME"
-                value = "memory-worker"
               },
               {
+                name  = "OTEL_SERVICE_NAME"
+                value = "memory-worker"
+                }, {
                 name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
                 value = "true"
-            }]
+              }
+            ]
           }
         ]
         scale = {
@@ -105,7 +113,7 @@ resource "azapi_resource" "memory_worker" {
                   namespace        = azurerm_servicebus_namespace.main.name
                   messageCount     = "5"
                 },
-                identity = "system"
+                identity = azurerm_user_assigned_identity.memory_worker.id
               }
             }
           ]

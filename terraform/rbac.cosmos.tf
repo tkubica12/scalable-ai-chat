@@ -29,21 +29,21 @@ resource "azurerm_cosmosdb_sql_role_assignment" "self" {
   scope               = azurerm_cosmosdb_account.main.id
 }
 
-resource "azurerm_cosmosdb_sql_role_assignment" "app" {
-  name                = random_uuid.cosmosdb_role_assignment_guid_app.result
-  resource_group_name = azurerm_resource_group.main.name
-  account_name        = azurerm_cosmosdb_account.main.name
-  role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
-  principal_id        = azurerm_user_assigned_identity.main.principal_id
-  scope               = azurerm_cosmosdb_account.main.id
-}
+# resource "azurerm_cosmosdb_sql_role_assignment" "app" {
+#   name                = random_uuid.cosmosdb_role_assignment_guid_app.result
+#   resource_group_name = azurerm_resource_group.main.name
+#   account_name        = azurerm_cosmosdb_account.main.name
+#   role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
+#   principal_id        = azurerm_user_assigned_identity.main.principal_id
+#   scope               = azurerm_cosmosdb_account.main.id
+# }
 
 resource "azurerm_cosmosdb_sql_role_assignment" "history_worker" {
   name                = random_uuid.cosmosdb_role_assignment_guid_history_worker.result
   resource_group_name = azurerm_resource_group.main.name
   account_name        = azurerm_cosmosdb_account.main.name
   role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
-  principal_id        = azapi_resource.history_worker.output.identity.principalId
+  principal_id        = azurerm_user_assigned_identity.history_worker.principal_id
   scope               = azurerm_cosmosdb_account.main.id
 }
 
@@ -52,7 +52,7 @@ resource "azurerm_cosmosdb_sql_role_assignment" "memory_api" {
   resource_group_name = azurerm_resource_group.main.name
   account_name        = azurerm_cosmosdb_account.main.name
   role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
-  principal_id        = azapi_resource.memory_api.output.identity.principalId
+  principal_id        = azurerm_user_assigned_identity.memory_api.principal_id
   scope               = azurerm_cosmosdb_account.main.id
 }
 
@@ -61,7 +61,7 @@ resource "azurerm_cosmosdb_sql_role_assignment" "memory_worker" {
   resource_group_name = azurerm_resource_group.main.name
   account_name        = azurerm_cosmosdb_account.main.name
   role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
-  principal_id        = azapi_resource.memory_worker.output.identity.principalId
+  principal_id        = azurerm_user_assigned_identity.memory_worker.principal_id
   scope               = azurerm_cosmosdb_account.main.id
 }
 
@@ -70,6 +70,6 @@ resource "azurerm_cosmosdb_sql_role_assignment" "history_api" {
   resource_group_name = azurerm_resource_group.main.name
   account_name        = azurerm_cosmosdb_account.main.name
   role_definition_id  = azurerm_cosmosdb_sql_role_definition.main.id
-  principal_id        = azapi_resource.history_api.output.identity.principalId
+  principal_id        = azurerm_user_assigned_identity.history_api.principal_id
   scope               = azurerm_cosmosdb_account.main.id
 }

@@ -3,9 +3,13 @@ resource "azapi_resource" "llm_worker" {
   name      = "ca-llmworker-${local.base_name}"
   location  = azurerm_resource_group.main.location
   parent_id = azurerm_resource_group.main.id
+
   body = {
     identity = {
-      type = "SystemAssigned"
+      type = "UserAssigned"
+      userAssignedIdentities = {
+        "${azurerm_user_assigned_identity.llm_worker.id}" = {}
+      }
     }
     properties = {
       managedEnvironmentId = azurerm_container_app_environment.main.id
@@ -22,6 +26,10 @@ resource "azapi_resource" "llm_worker" {
               memory = "1Gi"
             }
             env = [
+              {
+                name  = "AZURE_CLIENT_ID"
+                value = azurerm_user_assigned_identity.llm_worker.client_id
+              },
               {
                 name  = "SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"
                 value = "${azurerm_servicebus_namespace.main.name}.servicebus.windows.net"
@@ -53,13 +61,16 @@ resource "azapi_resource" "llm_worker" {
               {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
-              },              {
+              },
+              {
                 name  = "OTEL_SERVICE_NAME"
                 value = "llm-worker"
-                }, {
+              },
+              {
                 name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
                 value = "true"
-                }, {
+              },
+              {
                 name  = "AZURE_AI_CHAT_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
               },
@@ -82,7 +93,8 @@ resource "azapi_resource" "llm_worker" {
               {
                 name  = "MEMORY_API_TIMEOUT"
                 value = "2.0"
-            }]
+              }
+            ]
           }
         ]
         scale = {
@@ -100,7 +112,7 @@ resource "azapi_resource" "llm_worker" {
                   namespace        = azurerm_servicebus_namespace.main.name
                   messageCount     = "10"
                 },
-                identity = "system"
+                identity = azurerm_user_assigned_identity.llm_worker.id
               }
             }
           ]
