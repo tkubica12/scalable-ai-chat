@@ -209,7 +209,7 @@ if not REDIS_HOST:
 
 # Memory API configuration
 MEMORY_API_ENDPOINT = os.getenv("MEMORY_API_ENDPOINT")
-MEMORY_API_TIMEOUT = float(os.getenv("MEMORY_API_TIMEOUT", 2.0))  # 2 seconds default timeout
+MEMORY_API_TIMEOUT = float(os.getenv("MEMORY_API_TIMEOUT", 2.0))
 
 if not MEMORY_API_ENDPOINT:
     logger.warning("MEMORY_API_ENDPOINT not configured. Memory integration will be disabled.")

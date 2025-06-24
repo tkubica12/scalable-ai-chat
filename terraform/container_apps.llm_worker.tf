@@ -100,7 +100,7 @@ resource "azapi_resource" "llm_worker" {
               },
               {
                 name  = "MEMORY_API_TIMEOUT"
-                value = "2.0"
+                value = "4.0"
               }
             ]
           }
