@@ -9,11 +9,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.cosmos import CosmosClient, PartitionKey, exceptions
 from azure.monitor.opentelemetry import configure_azure_monitor
-from azure.ai.inference.aio import EmbeddingsClient
+from openai import AsyncAzureOpenAI
 from opentelemetry import trace
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
 
 # Load local .env when in development
 load_dotenv()
@@ -24,13 +25,17 @@ COSMOS_DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", "memory")
 COSMOS_CONVERSATIONS_CONTAINER_NAME = os.getenv("COSMOS_CONVERSATIONS_CONTAINER_NAME", "conversations")
 COSMOS_USER_MEMORIES_CONTAINER_NAME = os.getenv("COSMOS_USER_MEMORIES_CONTAINER_NAME", "user-memories")
 
-# Azure AI Inference endpoint for embeddings
-AZURE_AI_EMBEDDINGS_ENDPOINT = os.getenv("AZURE_AI_EMBEDDINGS_ENDPOINT")
+# Azure OpenAI endpoint for embeddings
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
 if not COSMOS_ENDPOINT:
     raise RuntimeError("Missing required environment variable COSMOS_ENDPOINT")
-if not AZURE_AI_EMBEDDINGS_ENDPOINT:
-    raise RuntimeError("Missing required environment variable AZURE_AI_EMBEDDINGS_ENDPOINT")
+if not AZURE_OPENAI_ENDPOINT:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_ENDPOINT")
+if not AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME")
 
 # Logging configuration
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -52,6 +57,13 @@ configure_azure_monitor(
         "urllib3": {"enabled": False},
     }
 )
+
+# Configure OpenAI instrumentation
+enable_content_recording = os.getenv("OTEL_INSTRUMENTATION_OPENAI_V2_RECORD_MESSAGE_CONTENT", "false").lower() == "true"
+OpenAIInstrumentor().instrument(
+    capture_content=enable_content_recording
+)
+
 tracer = trace.get_tracer(__name__)
 
 # Initialize Azure credentials and clients
@@ -61,12 +73,15 @@ database = cosmos_client.get_database_client(COSMOS_DATABASE_NAME)
 conversations_container = database.get_container_client(COSMOS_CONVERSATIONS_CONTAINER_NAME)
 user_memories_container = database.get_container_client(COSMOS_USER_MEMORIES_CONTAINER_NAME)
 
-# Initialize embeddings client with proper AAD authentication
-embeddings_client = EmbeddingsClient(
-    endpoint=AZURE_AI_EMBEDDINGS_ENDPOINT,
-    credential=credential,
-    api_version="2024-10-21",
-    credential_scopes=["https://cognitiveservices.azure.com/.default"]
+# Initialize OpenAI client with AAD authentication
+token_provider = get_bearer_token_provider(
+    credential, "https://cognitiveservices.azure.com/.default"
+)
+
+openai_client = AsyncAzureOpenAI(
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    azure_ad_token_provider=token_provider,
+    api_version=AZURE_OPENAI_API_VERSION,
 )
 
 # FastAPI app
@@ -110,6 +125,7 @@ class UserMemory(BaseModel):
     family_and_friends: Optional[List[str]] = None
     work_profile: Optional[List[str]] = None
     goals: Optional[List[str]] = None
+    last_updated: Optional[datetime] = None
 
 class MemorySearchRequest(BaseModel):
     query: str
@@ -141,10 +157,23 @@ class UserMemoryUpdate(BaseModel):
 
 # Helper functions
 async def generate_embedding(text: str) -> List[float]:
-    """Generate text embedding using Azure AI Inference."""
+    """
+    Generate text embedding using Azure OpenAI.
+    
+    Args:
+        text: The text to generate embeddings for
+        
+    Returns:
+        List[float]: Vector embedding for the text
+        
+    Raises:
+        Exception: If embedding generation fails
+    """
     try:
-        # Use the correct API - pass input as a list of strings
-        response = await embeddings_client.embed(input=[text])
+        response = await openai_client.embeddings.create(
+            input=[text],
+            model=AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME
+        )
         return response.data[0].embedding
     except Exception as e:
         logger.error(f"Failed to generate embedding: {e}")

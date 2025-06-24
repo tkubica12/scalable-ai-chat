@@ -53,14 +53,21 @@ resource "azapi_resource" "memory_api" {
               {
                 name  = "COSMOS_CONVERSATIONS_CONTAINER_NAME"
                 value = azapi_resource.memory_conversations.name
-              },
-              {
+                }, {
                 name  = "COSMOS_USER_MEMORIES_CONTAINER_NAME"
                 value = azapi_resource.memory_user_memories.name
               },
               {
-                name  = "AZURE_AI_EMBEDDINGS_ENDPOINT"
-                value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.embedding_model.name}"
+                name  = "AZURE_OPENAI_ENDPOINT"
+                value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
+              },
+              {
+                name  = "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME"
+                value = azurerm_cognitive_deployment.embedding_model.name
+              },
+              {
+                name  = "AZURE_OPENAI_API_VERSION"
+                value = "2025-04-01-preview"
               },
               {
                 name  = "LOG_LEVEL"

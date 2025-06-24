@@ -71,8 +71,16 @@ resource "azapi_resource" "llm_worker" {
                 value = "true"
               },
               {
-                name  = "AZURE_AI_CHAT_ENDPOINT"
-                value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
+                name  = "AZURE_OPENAI_ENDPOINT"
+                value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
+              },
+              {
+                name  = "AZURE_OPENAI_DEPLOYMENT_NAME"
+                value = azurerm_cognitive_deployment.openai_model.name
+              },
+              {
+                name  = "AZURE_OPENAI_API_VERSION"
+                value = "2025-04-01-preview"
               },
               {
                 name  = "REDIS_HOST"

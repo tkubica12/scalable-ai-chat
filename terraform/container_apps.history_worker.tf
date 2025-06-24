@@ -76,14 +76,21 @@ resource "azapi_resource" "history_worker" {
               {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
-              },
-              {
+                }, {
                 name  = "OTEL_SERVICE_NAME"
                 value = "history-worker"
               },
               {
-                name  = "AZURE_AI_CHAT_ENDPOINT"
-                value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
+                name  = "AZURE_OPENAI_ENDPOINT"
+                value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
+              },
+              {
+                name  = "AZURE_OPENAI_DEPLOYMENT_NAME"
+                value = azurerm_cognitive_deployment.openai_model.name
+              },
+              {
+                name  = "AZURE_OPENAI_API_VERSION"
+                value = "2025-04-01-preview"
               }
             ]
           }

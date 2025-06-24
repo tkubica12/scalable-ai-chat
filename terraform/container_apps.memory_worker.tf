@@ -64,18 +64,25 @@ resource "azapi_resource" "memory_worker" {
                 }, {
                 name  = "REDIS_PORT"
                 value = "10000"
-              },
-              {
+                }, {
                 name  = "REDIS_SSL"
                 value = "true"
               },
               {
-                name  = "AZURE_AI_CHAT_ENDPOINT"
-                value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.openai_model.name}"
+                name  = "AZURE_OPENAI_ENDPOINT"
+                value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
               },
               {
-                name  = "AZURE_AI_EMBEDDINGS_ENDPOINT"
-                value = "https://${azapi_resource.ai_service.name}.cognitiveservices.azure.com/openai/deployments/${azurerm_cognitive_deployment.embedding_model.name}"
+                name  = "AZURE_OPENAI_DEPLOYMENT_NAME"
+                value = azurerm_cognitive_deployment.openai_model.name
+              },
+              {
+                name  = "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME"
+                value = azurerm_cognitive_deployment.embedding_model.name
+              },
+              {
+                name  = "AZURE_OPENAI_API_VERSION"
+                value = "2025-04-01-preview"
               },
               {
                 name  = "MAX_CONCURRENCY"
@@ -84,14 +91,16 @@ resource "azapi_resource" "memory_worker" {
               {
                 name  = "LOG_LEVEL"
                 value = "INFO"
-                }, {
+              },
+              {
                 name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
                 value = azurerm_application_insights.main.connection_string
               },
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "memory-worker"
-                }, {
+              },
+              {
                 name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
                 value = "true"
               }

@@ -37,16 +37,24 @@ from azure.monitor.opentelemetry import configure_azure_monitor
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanProcessor
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
+from openai import AsyncAzureOpenAI
 from azure.cosmos.aio import CosmosClient
 from azure.cosmos import exceptions
 import redis.asyncio as redis
 from redis_entraid.cred_provider import create_from_default_azure_credential
-from azure.ai.inference.aio import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
 
 
 # Load .env in development
 load_dotenv()
+
+# Set environment variable to capture message content before instrumentation
+enable_content_recording = os.getenv("OTEL_INSTRUMENTATION_OPENAI_V2_RECORD_MESSAGE_CONTENT", "false").lower() == "true"
+
+# Enable OpenTelemetry instrumentation for OpenAI SDK with proper configuration
+OpenAIInstrumentor().instrument(
+    capture_content=enable_content_recording
+)
 
 # Context variables for storing application-specific information across spans
 current_user_id: ContextVar[str] = ContextVar('current_user_id', default=None)
@@ -115,9 +123,10 @@ class AppAttributesSpanProcessor(SpanProcessor):
             # Add application name for easier filtering
             span.set_attribute("app.name", "history-worker")
             
-        except Exception as e:
+        except Exception:
             # Don't fail span creation if attribute setting fails
-            logger.warning(f"Failed to add application attributes to span: {e}")
+            # Silently ignore errors to avoid telemetry issues
+            pass
     
     def on_end(self, span):
         """Called when a span is ended. No action needed for our use case."""
@@ -157,12 +166,18 @@ REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() == "true"
 if not REDIS_HOST:
     raise RuntimeError("Missing required environment variable REDIS_HOST")
 
-# Azure AI Inference endpoint for title generation
-AZURE_AI_CHAT_ENDPOINT = os.getenv("AZURE_AI_CHAT_ENDPOINT")
-if not AZURE_AI_CHAT_ENDPOINT:
-    raise RuntimeError("Missing required environment variable AZURE_AI_CHAT_ENDPOINT")
+# Azure OpenAI configuration for title generation
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 
-# Logging
+if not AZURE_OPENAI_ENDPOINT:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_ENDPOINT")
+
+if not AZURE_OPENAI_DEPLOYMENT_NAME:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_DEPLOYMENT_NAME")
+
+# Logging configuration - set up early to avoid telemetry issues
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'WARNING').upper()
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -234,14 +249,18 @@ async def generate_conversation_title(conversation_data: dict) -> str:
             return "New Conversation"
         
         conversation_text = "\n".join(conversation_excerpt)
-        
-        # Generate title using LLM with full conversation context
-        title_prompt = [
-            SystemMessage("You are a helpful assistant that generates concise conversation titles. Analyze the conversation and generate a short, descriptive title (3-6 words) that captures the main topic or theme. Do not use quotes or special characters. Return only the title."),
-            UserMessage(f"Generate a descriptive title for this conversation:\n\n{conversation_text}")
+          # Generate title using LLM with full conversation context
+        title_messages = [
+            {"role": "system", "content": "You are a helpful assistant that generates concise conversation titles. Analyze the conversation and generate a short, descriptive title (3-6 words) that captures the main topic or theme. Do not use quotes or special characters. Return only the title."},
+            {"role": "user", "content": f"Generate a descriptive title for this conversation:\n\n{conversation_text}"}
         ]
         
-        completion = await chat_client.complete(messages=title_prompt, max_tokens=25, temperature=0.3)
+        completion = await chat_client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=title_messages, 
+            max_tokens=25, 
+            temperature=0.3
+        )
         generated_title = completion.choices[0].message.content.strip()
         
         # Clean up the title
@@ -532,17 +551,20 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to initialize Redis client: {e}")
         raise
-    
-    # Initialize the chat client for title generation
+      # Initialize the OpenAI Azure client for title generation
     try:
-        chat_client = ChatCompletionsClient(
-            endpoint=AZURE_AI_CHAT_ENDPOINT,
-            credential=shared_credential,
-            credential_scopes=["https://cognitiveservices.azure.com/.default"]
+        async def get_azure_token():
+            token = await shared_credential.get_token("https://cognitiveservices.azure.com/.default")
+            return token.token
+        
+        chat_client = AsyncAzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            azure_ad_token_provider=get_azure_token,
+            api_version=AZURE_OPENAI_API_VERSION
         )
-        logger.info("Azure AI Chat client initialized successfully")
+        logger.info("Azure OpenAI client initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize Azure AI Chat client: {e}")
+        logger.error(f"Failed to initialize Azure OpenAI client: {e}")
         raise
     
     credential = DefaultAzureCredential()

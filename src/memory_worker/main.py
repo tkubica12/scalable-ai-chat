@@ -37,16 +37,22 @@ from azure.servicebus import ServiceBusMessage
 from azure.monitor.opentelemetry import configure_azure_monitor
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export import SpanProcessor
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
+from openai import AsyncAzureOpenAI
 import redis.asyncio as redis
 from redis_entraid.cred_provider import create_from_default_azure_credential
-from azure.ai.inference.aio import ChatCompletionsClient, EmbeddingsClient
-from azure.ai.inference.models import SystemMessage, UserMessage, JsonSchemaFormat
 from azure.cosmos.aio import CosmosClient
 from azure.cosmos import PartitionKey
 from pydantic import BaseModel, Field, ConfigDict
 
 # Load .env in development
 load_dotenv()
+
+# Enable OpenTelemetry instrumentation for OpenAI SDK
+OpenAIInstrumentor().instrument()
+
+# Set environment variable to capture message content
+os.environ.setdefault("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
 
 # Context variables for storing application-specific information across spans
 current_user_id: ContextVar[str] = ContextVar('current_user_id', default=None)
@@ -173,14 +179,20 @@ REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() == "true"
 if not REDIS_HOST:
     raise RuntimeError("Missing required environment variable REDIS_HOST")
 
-# Azure AI Inference endpoint
-AZURE_AI_CHAT_ENDPOINT = os.getenv("AZURE_AI_CHAT_ENDPOINT")
-if not AZURE_AI_CHAT_ENDPOINT:
-    raise RuntimeError("Missing required environment variable AZURE_AI_CHAT_ENDPOINT")
+# Azure OpenAI configuration  
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME")
 
-AZURE_AI_EMBEDDINGS_ENDPOINT = os.getenv("AZURE_AI_EMBEDDINGS_ENDPOINT")
-if not AZURE_AI_EMBEDDINGS_ENDPOINT:
-    raise RuntimeError("Missing required environment variable AZURE_AI_EMBEDDINGS_ENDPOINT")
+if not AZURE_OPENAI_ENDPOINT:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_ENDPOINT")
+
+if not AZURE_OPENAI_DEPLOYMENT_NAME:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_DEPLOYMENT_NAME")
+
+if not AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME:
+    raise RuntimeError("Missing required environment variable AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME")
 
 # CosmosDB configuration
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
@@ -229,7 +241,6 @@ shared_credential = DefaultAzureCredential(exclude_interactive_browser_credentia
 # Global clients - will be initialized in main()
 redis_client = None
 chat_client = None
-embeddings_client = None
 cosmos_client = None
 
 # Global shutdown event for graceful shutdown
@@ -237,11 +248,21 @@ shutdown_event = asyncio.Event()
 
 async def generate_vector_embedding(text: str) -> List[float]:
     """
-    Generate vector embedding for the given text using Azure AI Embeddings API.
+    Generate vector embedding for the given text using Azure OpenAI.
+    
+    Args:
+        text: The text to generate embeddings for
+        
+    Returns:
+        List[float]: Vector embedding for the text
+        
+    Raises:
+        Exception: If embedding generation fails
     """
     try:
-        response = await embeddings_client.embed(
-            input=[text]
+        response = await chat_client.embeddings.create(
+            input=[text],
+            model=AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME
         )
         return response.data[0].embedding
     except Exception as e:
@@ -288,19 +309,24 @@ It is OK to return empty field if not applicable.
 Return structured data following the specified schema.
 """
 
-        user_prompt = f"Analyze this conversation:\n\n{conversation_text}"   
-        response = await chat_client.complete(
+        user_prompt = f"Analyze this conversation:\n\n{conversation_text}"
+        response = await chat_client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000,            response_format=JsonSchemaFormat(
-                name="ConversationAnalysis",
-                schema=ConversationSummary.model_json_schema(),
-                description="Structured analysis of a conversation including summary, themes, persons, places, and user sentiment",
-                strict=True
-            )
+            max_tokens=1000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ConversationAnalysis", 
+                    "schema": ConversationSummary.model_json_schema(),
+                    "description": "Structured analysis of a conversation including summary, themes, persons, places, and user sentiment",
+                    "strict": True
+                }
+            }
         )
         
         # Parse the structured response
@@ -381,18 +407,23 @@ IMPORTANT: You must provide values for ALL fields in the response. If there is n
 """
 
         user_prompt = f"Extract new user memory information from this conversation:\n\n{conversation_text}"
-        response = await chat_client.complete(
+        response = await chat_client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000,            response_format=JsonSchemaFormat(
-                name="UserMemoryUpdates",
-                schema=UserMemoryUpdates.model_json_schema(),
-                description="Updates to user memory based on conversation analysis",
-                strict=True
-            )
+            max_tokens=1000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "UserMemoryUpdates",
+                    "schema": UserMemoryUpdates.model_json_schema(),
+                    "description": "Updates to user memory based on conversation analysis",
+                    "strict": True
+                }
+            }
         )
           # Parse the structured response
         content = response.choices[0].message.content
@@ -747,7 +778,7 @@ async def main():
     """
     Main application entry point.
     """
-    global redis_client, chat_client, embeddings_client, cosmos_client
+    global redis_client, chat_client, cosmos_client
     
     logger.info("Starting Memory Worker service...")
     
@@ -773,24 +804,16 @@ async def main():
         # Test Redis connection
         await redis_client.ping()
         logger.info("Redis connection established")
+          # Initialize OpenAI Azure client
+        async def get_azure_token():
+            token = await shared_credential.get_token("https://cognitiveservices.azure.com/.default")
+            return token.token
         
-        # Initialize LLM client
-        chat_client = ChatCompletionsClient(
-            endpoint=AZURE_AI_CHAT_ENDPOINT,
-            credential=shared_credential,
-            api_version="2024-10-21",
-            credential_scopes=["https://cognitiveservices.azure.com/.default"]
-        )
-        logger.info("LLM client initialized")
-        
-        # Initialize Embeddings client
-        embeddings_client = EmbeddingsClient(
-            endpoint=AZURE_AI_EMBEDDINGS_ENDPOINT,
-            credential=shared_credential,
-            api_version="2024-10-21",
-            credential_scopes=["https://cognitiveservices.azure.com/.default"]
-        )
-        logger.info("Embeddings client initialized")
+        chat_client = AsyncAzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            azure_ad_token_provider=get_azure_token,
+            api_version=AZURE_OPENAI_API_VERSION        )
+        logger.info("OpenAI client initialized")
         
         # Initialize CosmosDB client
         cosmos_client = CosmosClient(
@@ -857,8 +880,7 @@ async def main():
         
         # Wait for active tasks to complete during shutdown
         await wait_for_tasks_completion(active_tasks, timeout=60)
-        
-        # Cleanup resources
+          # Cleanup resources
         try:
             if redis_client:
                 await redis_client.aclose()
@@ -873,13 +895,6 @@ async def main():
         except Exception as e:
             logger.error(f"Error closing chat client: {e}")
             
-        try:
-            if embeddings_client:
-                await embeddings_client.aclose()
-                logger.info("Embeddings client closed")
-        except Exception as e:
-            logger.error(f"Error closing embeddings client: {e}")
-        
         try:
             if cosmos_client:
                 await cosmos_client.aclose()
