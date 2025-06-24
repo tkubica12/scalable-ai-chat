@@ -493,7 +493,7 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             # Debug: Log the complete messages array as JSON
             logger.debug(f"Messages sent to LLM: {json.dumps(messages, indent=2, default=str)}")
             
-            logger.info(f"Calling LLM with {len(messages)} messages (including system message and history)")            # Call OpenAI API for chat completions with streaming and tools
+            logger.info(f"Calling LLM with {len(messages)} messages (including system message and history)")
             stream = await chat_client.chat.completions.create(
                 model=AZURE_OPENAI_DEPLOYMENT_NAME,
                 messages=messages,

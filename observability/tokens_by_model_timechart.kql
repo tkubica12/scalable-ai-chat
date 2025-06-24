@@ -1,0 +1,13 @@
+dependencies
+| where customDimensions["gen_ai.usage.input_tokens"] != "" and customDimensions["gen_ai.usage.output_tokens"] != ""
+| project
+    timestamp,
+    cloud_RoleName,
+    cloud_RoleInstance,
+    userId = tostring(customDimensions["app.user_id"]),
+    sessionId = tostring(customDimensions["app.session_id"]),
+    inputTokens = toint(customDimensions["gen_ai.usage.input_tokens"]),
+    outputTokens = toint(customDimensions["gen_ai.usage.output_tokens"]),
+    model = tostring(customDimensions["gen_ai.response.model"])
+| summarize totalInputTokens = sum(inputTokens), totalOutputTokens = sum(outputTokens) by bin(timestamp, 5m), model
+| render timechart 
