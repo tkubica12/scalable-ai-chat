@@ -534,140 +534,172 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                         )
                         await sender.send_messages(token_message)
                         logger.debug(f"Sent token chunk: {content_chunk}")
-                    
-                    # Handle function calls (accumulate arguments for each tool call)
+                      # Handle function calls (accumulate arguments for each tool call)
                     if delta.tool_calls:
                         for tool_call in delta.tool_calls:
                             logger.debug(f"Tool call delta: index={tool_call.index}, id={tool_call.id}, function={tool_call.function}")
                             
-                            # Use index to track tool calls if ID is not available in this chunk
-                            tool_call_key = tool_call.id if tool_call.id else f"index_{tool_call.index}"
+                            # Always use index as the primary key for tracking tool calls
+                            tool_call_index = tool_call.index
                             
-                            if tool_call_key not in function_calls:
-                                function_calls[tool_call_key] = {
-                                    "id": tool_call.id or tool_call_key,
-                                    "index": tool_call.index,
+                            if tool_call_index not in function_calls:
+                                function_calls[tool_call_index] = {
+                                    "id": "",
+                                    "index": tool_call_index,
                                     "name": "",
                                     "arguments": ""
                                 }
-                                logger.debug(f"Initialized function call: {tool_call_key}")
+                                logger.debug(f"Initialized function call at index {tool_call_index}")
+                            
+                            # Update ID if provided in this chunk
+                            if tool_call.id:
+                                function_calls[tool_call_index]["id"] = tool_call.id
+                                logger.debug(f"Set ID for tool call {tool_call_index}: {tool_call.id}")
                             
                             if tool_call.function:
                                 if tool_call.function.name:
-                                    function_calls[tool_call_key]["name"] = tool_call.function.name
-                                    logger.info(f"Function call detected: {tool_call.function.name}")
+                                    function_calls[tool_call_index]["name"] = tool_call.function.name
+                                    logger.info(f"Function call detected at index {tool_call_index}: {tool_call.function.name}")
                                 
                                 if tool_call.function.arguments is not None:
-                                    logger.debug(f"Adding arguments chunk: '{tool_call.function.arguments}' to call {tool_call_key}")
-                                    function_calls[tool_call_key]["arguments"] += tool_call.function.arguments
-                                    logger.debug(f"Current accumulated arguments for {tool_call_key}: '{function_calls[tool_call_key]['arguments']}'")
-                
-            # Process function calls if any
+                                    logger.debug(f"Adding arguments chunk: '{tool_call.function.arguments}' to call index {tool_call_index}")
+                                    function_calls[tool_call_index]["arguments"] += tool_call.function.arguments
+                                    logger.debug(f"Current accumulated arguments for index {tool_call_index}: '{function_calls[tool_call_index]['arguments']}'")
+                  # Process function calls if any
             if function_calls:
                 logger.info(f"Processing {len(function_calls)} function calls")
                 logger.debug(f"Complete function calls state: {function_calls}")
                 
                 # Convert function_calls dict to list for processing
                 function_calls_list = list(function_calls.values())
+                  # Log each function call for debugging
+                for i, func_call in enumerate(function_calls_list):
+                    logger.debug(f"Function call {i}: name='{func_call['name']}', id='{func_call['id']}', args='{func_call['arguments'][:100]}{'...' if len(func_call['arguments']) > 100 else ''}'")
                 
-                # Create assistant message with tool calls first
+                # Post-process function calls to ensure proper IDs and validation
+                for func_call in function_calls_list:
+                    # If ID is empty, generate one based on index
+                    if not func_call["id"] or func_call["id"].strip() == "":
+                        func_call["id"] = f"call_index_{func_call['index']}"
+                        logger.debug(f"Generated ID for tool call at index {func_call['index']}: {func_call['id']}")                # Create assistant message with tool calls first
                 assistant_tool_calls = []
                 for func_call in function_calls_list:
+                    # Only include tool calls that have a valid function name
+                    if not func_call["name"] or func_call["name"].strip() == "":
+                        logger.warning(f"Skipping tool call with empty name: {func_call}")
+                        continue
+                        
                     # Create a tool call object for the assistant message
                     tool_call_dict = {
-                        "id": func_call["id"],
+                        "id": func_call["id"],  # ID is guaranteed to be set by post-processing above
                         "type": "function",
                         "function": {
                             "name": func_call["name"],
-                            "arguments": func_call["arguments"]
+                            "arguments": func_call["arguments"] or "{}"
                         }
                     }
                     assistant_tool_calls.append(tool_call_dict)
-                
-                # Add assistant message with tool calls to conversation
-                assistant_message = {
-                    "role": "assistant",
-                    "content": "",  # Usually empty when there are tool calls
-                    "tool_calls": assistant_tool_calls
-                }
-                messages.append(assistant_message)
-                logger.debug(f"Added assistant message with {len(assistant_tool_calls)} tool calls")
-                
-                # Execute function calls and add tool responses
-                for func_call in function_calls_list:
-                    logger.debug(f"Processing function call: {func_call}")
-                    if func_call["name"] == "search_conversation_history":
-                        try:
-                            logger.debug(f"Raw function arguments: '{func_call['arguments']}'")
-                            args = json.loads(func_call["arguments"]) if func_call["arguments"].strip() else {}
-                            search_query = args.get("search_query", "")
-                            limit = args.get("limit", 5)
-                            
-                            logger.info(f"Executing conversation search: query='{search_query}', limit={limit}")
-                            
-                            if not search_query:
-                                logger.warning(f"Empty search query detected! Full function call: {func_call}")                            
-                            search_result = await search_conversation_history(user_id, search_query, limit)
-                            
-                            # Add tool message to conversation
-                            tool_message = {
-                                "role": "tool",
-                                "content": json.dumps(search_result, indent=2),
-                                "tool_call_id": func_call["id"]
-                            }
-                            messages.append(tool_message)
-                            
-                            logger.info(f"Function call result: Found {search_result.get('total_found', 0)} conversations")
-                            
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Error parsing function arguments '{func_call['arguments']}': {e}")
-                            error_message = {
-                                "role": "tool",
-                                "content": json.dumps({"error": f"Invalid function arguments: {str(e)}"}),
-                                "tool_call_id": func_call["id"]
-                            }
-                            messages.append(error_message)
-                        except Exception as e:
-                            logger.error(f"Error executing function call: {e}")
-                            error_message = {
-                                "role": "tool", 
-                                "content": json.dumps({"error": str(e)}),
-                                "tool_call_id": func_call["id"]
-                            }
-                            messages.append(error_message)
-                
-                # Make another LLM call with the function results
-                logger.info("Making follow-up LLM call with function results")
-                followup_stream = await chat_client.chat.completions.create(
-                    model=AZURE_OPENAI_DEPLOYMENT_NAME,
-                    messages=messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    tools=[conversation_search_tool],
-                    tool_choice="auto",
-                    temperature=0.7
-                )                
-                # Process the follow-up response
-                async for chunk in followup_stream:
-                    if chunk.usage:
-                        usage_info = chunk.usage  # Update usage info with follow-up call
-                        logger.info(f"Follow-up Token usage: input={chunk.usage.prompt_tokens}, output={chunk.usage.completion_tokens}, total={chunk.usage.total_tokens}")
+                    logger.debug(f"Added valid tool call: {func_call['name']} with ID {func_call['id']}")
+                # Only proceed if we have valid tool calls
+                if not assistant_tool_calls:
+                    logger.warning("No valid tool calls found after filtering, skipping function call processing")
+                else:
+                    # Add assistant message with tool calls to conversation
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": "",  # Usually empty when there are tool calls
+                        "tool_calls": assistant_tool_calls
+                    }
+                    messages.append(assistant_message)
+                    logger.debug(f"Added assistant message with {len(assistant_tool_calls)} tool calls")                    # Execute function calls and add tool responses
+                    for func_call in function_calls_list:
+                        # Skip tool calls with empty names (IDs are guaranteed to be set by post-processing)
+                        if not func_call["name"] or func_call["name"].strip() == "":
+                            logger.warning(f"Skipping invalid tool call during execution: {func_call}")
+                            continue                            
+                        logger.debug(f"Processing function call: {func_call}")
+                        if func_call["name"] == "search_conversation_history":
+                            try:
+                                logger.debug(f"Raw function arguments: '{func_call['arguments']}'")
+                                
+                                # Parse arguments with better error handling
+                                if not func_call["arguments"] or func_call["arguments"].strip() == "":
+                                    logger.warning(f"Empty arguments for search_conversation_history call: {func_call}")
+                                    args = {}
+                                else:
+                                    try:
+                                        args = json.loads(func_call["arguments"])
+                                    except json.JSONDecodeError as parse_error:
+                                        logger.error(f"Failed to parse JSON arguments '{func_call['arguments']}': {parse_error}")
+                                        raise parse_error
+                                
+                                search_query = args.get("search_query", "")
+                                limit = args.get("limit", 5)
+                                
+                                logger.info(f"Executing conversation search: query='{search_query}', limit={limit}")
+                                
+                                # Execute the search
+                                search_result = await search_conversation_history(user_id, search_query, limit)
+                                
+                                # Add tool message to conversation
+                                tool_message = {
+                                    "role": "tool",
+                                    "content": json.dumps(search_result, indent=2),
+                                    "tool_call_id": func_call["id"]
+                                }
+                                messages.append(tool_message)
+                                
+                                logger.info(f"Function call result: Found {search_result.get('total_found', 0)} conversations")
+                                
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Error parsing function arguments '{func_call['arguments']}': {e}")
+                                error_message = {
+                                    "role": "tool",
+                                    "content": json.dumps({"error": f"Invalid function arguments: {str(e)}"}),
+                                    "tool_call_id": func_call["id"]
+                                }
+                                messages.append(error_message)
+                            except Exception as e:
+                                logger.error(f"Error executing function call: {e}")
+                                error_message = {
+                                    "role": "tool", 
+                                    "content": json.dumps({"error": str(e)}),
+                                    "tool_call_id": func_call["id"]
+                                }
+                                messages.append(error_message)
                     
-                    if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        content_chunk = chunk.choices[0].delta.content
-                        assistant_response_tokens.append(content_chunk)
+                    # Make another LLM call with the function results
+                    logger.info("Making follow-up LLM call with function results")
+                    followup_stream = await chat_client.chat.completions.create(
+                        model=AZURE_OPENAI_DEPLOYMENT_NAME,
+                        messages=messages,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        tools=[conversation_search_tool],
+                        tool_choice="auto",
+                        temperature=0.7
+                    )                
+                    # Process the follow-up response
+                    async for chunk in followup_stream:
+                        if chunk.usage:
+                            usage_info = chunk.usage  # Update usage info with follow-up call
+                            logger.info(f"Follow-up Token usage: input={chunk.usage.prompt_tokens}, output={chunk.usage.completion_tokens}, total={chunk.usage.total_tokens}")
                         
-                        token_payload = {
-                            "sessionId": session_id,
-                            "chatMessageId": chat_message_id,
-                            "token": content_chunk
-                        }
-                        token_message = ServiceBusMessage(
-                            body=json.dumps(token_payload),
-                            session_id=session_id
-                        )
-                        await sender.send_messages(token_message)
-                        logger.debug(f"Sent follow-up token chunk: {content_chunk}")
+                        if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            content_chunk = chunk.choices[0].delta.content
+                            assistant_response_tokens.append(content_chunk)
+                            
+                            token_payload = {
+                                "sessionId": session_id,
+                                "chatMessageId": chat_message_id,
+                                "token": content_chunk
+                            }
+                            token_message = ServiceBusMessage(
+                                body=json.dumps(token_payload),
+                                session_id=session_id
+                            )
+                            await sender.send_messages(token_message)
+                            logger.debug(f"Sent follow-up token chunk: {content_chunk}")
             
             # Send end-of-stream sentinel
             eos_payload = {"sessionId": session_id, "chatMessageId": chat_message_id, "end_of_stream": True}
@@ -803,12 +835,17 @@ async def search_conversation_history(user_id: str, search_query: str, limit: in
         logger.debug("Memory API endpoint not configured, skipping conversation history search")
         return {"conversations": [], "message": "Memory API not available"}
     
+    # Handle empty search queries
+    if not search_query or search_query.strip() == "":
+        logger.warning("Empty search query provided to search_conversation_history")
+        return {"conversations": [], "message": "Empty search query provided"}
+    
     try:
         timeout = aiohttp.ClientTimeout(total=MEMORY_API_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             url = f"{MEMORY_API_ENDPOINT}/api/memory/users/{user_id}/conversations/search"
             payload = {
-                "query": search_query,
+                "query": search_query.strip(),
                 "limit": max(1, min(10, limit))  # Ensure limit is between 1 and 10
             }
             
