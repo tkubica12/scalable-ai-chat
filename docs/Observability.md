@@ -128,6 +128,8 @@ All services enrich their telemetry with custom `app.*` attributes for better ob
 - `app.user_id`: User identifier for request correlation
 - `app.session_id`: Chat session identifier
 - `app.chat_message_id`: Unique message identifier
+- `app.run_id`: Durable run identifier for a chat turn or agent execution
+- `app.thread_id`: Durable thread/session identifier used by the run API
 - `app.operation`: Operation type (e.g., "session_start", "chat_message")
 - `app.name`: Service identifier for filtering
 
@@ -318,5 +320,4 @@ dependencies
 | summarize totalInputTokens = sum(inputTokens), totalOutputTokens = sum(outputTokens) by bin(timestamp, 5m), model
 | render timechart
 ```
-
 

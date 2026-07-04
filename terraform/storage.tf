@@ -18,3 +18,13 @@ resource "azapi_resource" "storage_account_main" {
     }
   }
 }
+
+# Private Blob container for durable artifact storage (charts, tables, files, generated
+# HTML/JS artifacts produced by chat runs). Access is only via Entra ID/managed identity
+# (Storage Blob Data Contributor/Reader RBAC) or short-lived user-delegation SAS URLs minted
+# by the artifact API; the container itself stays private (no public/anonymous access).
+resource "azurerm_storage_container" "artifacts" {
+  name                  = "artifacts"
+  storage_account_id    = azapi_resource.storage_account_main.id
+  container_access_type = "private"
+}

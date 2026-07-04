@@ -1,0 +1,13 @@
+{
+  "type": "ToolCallResult",
+  "runId": "run_example",
+  "threadId": "thread_example",
+  "messageId": "msg_example_assistant",
+  "toolCallId": "call_example",
+  "sequence": 3,
+  "timestamp": "2026-07-04T08:00:02Z",
+  "result": {
+    "conversations": [],
+    "total_found": 0
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tkubica12/scalable-ai-chat/docs/protocol/agent-ui-events.schema.json",
+  "title": "Scalable AI Chat agent UI event",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "runId", "threadId", "sequence", "timestamp"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "RunStarted",
+        "RunFinished",
+        "RunError",
+        "RunCancelled",
+        "TextMessageStart",
+        "TextMessageContent",
+        "TextMessageEnd",
+        "ToolCallStart",
+        "ToolCallArgs",
+        "ToolCallEnd",
+        "ToolCallResult",
+        "StateSnapshot",
+        "StateDelta",
+        "ArtifactCreated",
+        "ArtifactDelta",
+        "ArtifactFinalized",
+        "Heartbeat",
+        "Usage",
+        "SafetyVerdict"
+      ]
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9_-]+$"
+    },
+    "threadId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "messageId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toolCallId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "delta": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "completed", "failed", "cancelled", "cancelling"]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["message"],
+      "properties": {
+        "message": { "type": "string", "minLength": 1 },
+        "code": { "type": "string" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "TextMessageContent" } } },
+      "then": { "required": ["messageId", "delta"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "Usage" } } },
+      "then": { "required": ["usage"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "RunError" } } },
+      "then": { "required": ["error"] }
+    }
+  ]
+}

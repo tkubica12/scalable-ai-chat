@@ -20,16 +20,16 @@ resource "azapi_resource" "memory_conversations" {
         vectorEmbeddingPolicy = {
           vectorEmbeddings = [
             {
-              dataType = "float32"
-              dimensions = 3072
+              dataType         = "float32"
+              dimensions       = 3072
               distanceFunction = "cosine"
-              path = "/vector_embedding"
+              path             = "/vector_embedding"
             }
           ]
         }
         indexingPolicy = {
           indexingMode = "consistent"
-          automatic = true
+          automatic    = true
           includedPaths = [
             {
               path = "/*"

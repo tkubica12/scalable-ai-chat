@@ -67,12 +67,11 @@ The Terraform configuration will deploy the following Azure resources:
 *   **Azure Cosmos DB:** Used for storing chat history and user memory. Separate databases and containers are created for `history` and `memory`.
 *   **Azure Service Bus:** A messaging service used for communication between microservices.
     *   **Performance SKU:** The `service_bus_sku` variable in `demo.auto.tfvars` (defaulting to "Standard") determines the performance tier. Options include Basic, Standard, and Premium, each offering different levels of throughput and features.
-*   **Azure OpenAI Service:** Provides access to large language models.
-*   **Azure AI Hub/Project:** (via `azapi_resource`) For managing AI services and projects within Azure.
-*   **Azure Cache for Redis Enterprise:** Used for caching and session management.
+*   **Azure OpenAI / Microsoft Foundry resource:** Provides model deployments and a Foundry project under the `Microsoft.CognitiveServices/accounts` `AIServices` resource model.
+*   **Azure Cache for Redis Enterprise:** Used for hot conversation state, durable run metadata, cancellation flags, and Redis Streams event replay.
 *   **Azure Key Vault:** For securely storing secrets and keys.
 *   **Azure Log Analytics Workspace & Application Insights:** For monitoring, logging, and diagnostics.
-*   **Azure Storage Account:** Used for various purposes, including potentially Terraform state storage (if configured).
+*   **Azure Storage Account:** Used for various purposes, including potentially Terraform state storage (if configured) and a private `artifacts` Blob container for generated artifacts.
 *   **User Assigned Managed Identity:** Provides an Azure Active Directory identity for applications to use when connecting to resources that support AAD authentication.
 
 **Region:** The `location` variable in `terraform/variables.tf` defines the primary Azure region for resource deployment. The `llm_location` variable can be used to specify a different region for LLM deployments if needed (e.g., due to model availability).
@@ -96,7 +95,7 @@ It's possible to run and test the services locally.
     *   Service Bus connection strings or relevant AAD details for local authentication.
     *   Cosmos DB connection strings or AAD details.
     *   Redis connection details.
-    *   Azure OpenAI endpoint and API key.
+    *   Azure OpenAI/Foundry endpoint. Model calls use Microsoft Entra authentication through `DefaultAzureCredential` rather than API keys.
     *   URLs for other local or deployed services they need to communicate with.
 
     Example structure for a `.env` file (this is a hypothetical example, actual variables will depend on each service's needs):
@@ -112,7 +111,6 @@ It's possible to run and test the services locally.
     REDIS_PASSWORD="<your-redis-password>" # If using basic auth, otherwise AAD details
     # Azure OpenAI
     AZURE_OPENAI_ENDPOINT="<your-aoai-endpoint>"
-    AZURE_OPENAI_API_KEY="<your-aoai-key>" # Or configure AAD auth
 
     # Example for a specific service if it needs to know another service's URL
     HISTORY_API_URL="http://localhost:8001"
@@ -141,3 +139,37 @@ Each service is a Python application (except `web_client` which is Node.js/Svelt
     ```
 
 Refer to the `README.md` file within each service's directory for more specific instructions on building and running that particular service.
+
+### Run/Event API smoke flow
+
+Create a run through `front_service`:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/runs -ContentType 'application/json' -Body '{
+  "threadId": "local-thread",
+  "userId": "user_001",
+  "input": { "messages": [{ "role": "user", "content": "Hello" }], "attachments": [] },
+  "capabilities": { "text": true, "toolEvents": true, "declarativeArtifacts": true, "sandboxedApps": false }
+}'
+```
+
+Stream events from `sse_service`:
+
+```powershell
+curl.exe -N http://localhost:8002/api/runs/<runId>/events
+```
+
+Cancel a run explicitly:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/runs/<runId>/cancel
+```
+
+### Validation commands
+
+```powershell
+python scripts\validate_protocol_examples.py
+foreach ($svc in Get-ChildItem src -Directory) { if (Test-Path "$($svc.FullName)\pyproject.toml") { Push-Location $svc.FullName; uv run python -m compileall .; Pop-Location } }
+Push-Location src\web_client; npm ci; npm run build; Pop-Location
+Push-Location terraform; terraform fmt -check; terraform validate; Pop-Location
+```

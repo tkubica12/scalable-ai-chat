@@ -1,0 +1,8 @@
+{
+  "type": "RunStarted",
+  "runId": "run_example",
+  "threadId": "thread_example",
+  "sequence": 1,
+  "timestamp": "2026-07-04T08:00:00Z",
+  "status": "running"
+}

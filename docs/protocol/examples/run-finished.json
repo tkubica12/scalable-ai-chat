@@ -1,0 +1,8 @@
+{
+  "type": "RunFinished",
+  "runId": "run_example",
+  "threadId": "thread_example",
+  "sequence": 4,
+  "timestamp": "2026-07-04T08:00:03Z",
+  "status": "completed"
+}

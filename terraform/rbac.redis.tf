@@ -53,3 +53,31 @@ resource "azapi_resource" "redis_access_llm_worker" {
     }
   }
 }
+
+resource "azapi_resource" "redis_access_front_service" {
+  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2024-09-01-preview"
+  name      = "frontservice"
+  parent_id = azapi_resource.redis_db.id
+  body = {
+    properties = {
+      accessPolicyName = "default"
+      user = {
+        objectId = azurerm_user_assigned_identity.front_service.principal_id
+      }
+    }
+  }
+}
+
+resource "azapi_resource" "redis_access_sse_service" {
+  type      = "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2024-09-01-preview"
+  name      = "sseservice"
+  parent_id = azapi_resource.redis_db.id
+  body = {
+    properties = {
+      accessPolicyName = "default"
+      user = {
+        objectId = azurerm_user_assigned_identity.sse_service.principal_id
+      }
+    }
+  }
+}

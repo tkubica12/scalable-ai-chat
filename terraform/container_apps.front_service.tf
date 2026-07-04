@@ -82,6 +82,18 @@ resource "azapi_resource" "front_service" {
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "front-service"
+              },
+              {
+                name  = "REDIS_HOST"
+                value = azapi_resource.redis.output.properties.hostName
+              },
+              {
+                name  = "REDIS_PORT"
+                value = "10000"
+              },
+              {
+                name  = "REDIS_SSL"
+                value = "true"
               }
             ]
           }

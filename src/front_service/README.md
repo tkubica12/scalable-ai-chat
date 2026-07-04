@@ -4,12 +4,10 @@ This service implements the **Front Service** component of the scalable chat arc
 
 Key responsibilities:
 - Exposes an HTTP endpoint (`POST /api/session/start`) to initiate a chat session and provide a `sessionId`.
-- Exposes an HTTP endpoint (`POST /api/chat`) to receive user questions, `sessionId`, and a client-generated `messageId`.
-- Initiates a Server-Sent Events (SSE) stream back to the client for the duration of the chat request.
-- Enqueues incoming questions (including `text`, `sessionId`, and `messageId`) onto an Azure Service Bus Topic (`user-messages`).
-- Listens for response tokens from another Azure Service Bus Topic (`token-streams`), specifically for its subscription.
-- Forwards these tokens to the correct client via the SSE stream, based on `sessionId`.
-- Sends an `__END__` signal over SSE when the worker indicates the end of a stream for a particular `messageId`.
+- Exposes `POST /api/runs`, `GET /api/runs/{runId}`, and `POST /api/runs/{runId}/cancel` for durable agent runs.
+- Keeps `POST /api/chat` as a compatibility wrapper that creates a run internally.
+- Stores run metadata and cancellation intent in Redis.
+- Enqueues incoming runs onto the Azure Service Bus `user-messages` topic.
 
 Configuration:
 - Uses `DefaultAzureCredentials` from `azure-identity` for authentication in Azure.
@@ -17,21 +15,23 @@ Configuration:
 - Environment variables:
   - `SERVICEBUS_FULLY_QUALIFIED_NAMESPACE` (e.g., `mysb.servicebus.windows.net`)
   - `SERVICEBUS_USER_MESSAGES_TOPIC` (topic to send user questions to workers)
-  - `SERVICEBUS_TOKEN_STREAMS_TOPIC` (topic to receive token streams from workers)
-  - `SERVICEBUS_TOKEN_STREAMS_SUBSCRIPTION` (subscription for this front service instance to receive token streams)
+  - `REDIS_HOST`, `REDIS_PORT`, `REDIS_SSL` (run metadata and cancellation state)
+  - `RUN_TTL_SECONDS` (run metadata and mapping TTL; default 86400)
   - `LOG_LEVEL` (e.g., `INFO`, `DEBUG`, `WARNING`)
-  - `OS_ENV` (`local` vs `prod`) - *Note: This variable was mentioned but isn't explicitly used in the provided `main.py` snippet. If used, its purpose should be clarified here.*
-  - Optional: other Azure resources connection strings or identifiers.
 
 Endpoints:
 - `POST /api/session/start`:
   - Request: (No body needed)
   - Response: `{"sessionId": "<generated-uuid>"}`
+- `POST /api/runs`:
+  - Request Body: `{"threadId":"<thread-id>","userId":"user_001","input":{"messages":[{"role":"user","content":"Hello"}],"attachments":[]},"capabilities":{"text":true,"toolEvents":true}}`
+  - Response: `{"runId":"run_...","threadId":"<thread-id>","status":"queued","eventsUrl":"/api/runs/run_.../events"}`
+- `GET /api/runs/{runId}`:
+  - Response: current run metadata from Redis.
+- `POST /api/runs/{runId}/cancel`:
+  - Response: cancellation status.
 - `POST /api/chat`:
-  - Request Body: `{"message": "user question", "sessionId": "<session-id>", "messageId": "<client-generated-uuid>"}`
-  - Response: SSE stream (`text/event-stream`)
-    - Data events: `data: {"token": "<char_token>"}\n\n`
-    - End-of-message signal: `data: __END__\n\n`
+  - Compatibility wrapper for old clients. Returns the old fields plus `runId` and `eventsUrl`.
 
 The OpenAPI spec is available at `/openapi.json` and UI docs at `/docs` when running the FastAPI application.
 

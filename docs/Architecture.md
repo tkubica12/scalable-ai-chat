@@ -21,15 +21,24 @@
     - [5. Function Calling and Dynamic Conversation Search](#5-function-calling-and-dynamic-conversation-search)
 
 ## Overview  
-This architecture enables a scalable, reliable, and secure chat application using **Server-Sent Events (SSE)** for real-time streaming responses and **asynchronous worker processes** for heavy lifting. The design decouples the user-facing front-end from the back-end computational work via a message queue, allowing each component to scale and fail independently without disrupting the whole system.
+This architecture enables a scalable, reliable, and secure chat application using a durable **run** resource, replayable **Server-Sent Events (SSE)** for real-time responses, and **asynchronous worker processes** for heavy lifting. The design decouples the user-facing front-end from the back-end computational work via a message queue, allowing each component to scale and fail independently without disrupting the whole system.
+
+The current public protocol is:
+
+- `POST /api/runs` creates a queued run and returns `runId` plus `eventsUrl`.
+- `GET /api/runs/{runId}` returns run metadata.
+- `GET /api/runs/{runId}/events` streams typed JSON events with SSE `id:`, `event:`, and `data:` fields.
+- `POST /api/runs/{runId}/cancel` records explicit cancellation intent.
+
+Legacy `/api/session/start`, `/api/chat`, and `/api/stream/{sessionId}/{chatMessageId}` remain available while the web client and tests migrate.
 
 **Key components:**  
 - **Client Application (Browser/App):** Sends user questions to the front service and connects to the SSE service for streaming responses via Server-Sent Events. Maintains a session ID to identify the conversation thread and user ID for authentication. Can also retrieve conversation history from History API and user memories from Memory API/MCP for display purposes.
-- **Front Service (Message Handler):** A lightweight service that accepts client questions over HTTP, manages sessions, and provides conversation history API. It queues messages for processing but does not handle streaming responses directly. Handles user authentication and session management.  
-- **SSE Service (Streaming Service):** A dedicated service that handles Server-Sent Events connections and streams tokens back to clients. This service can be scaled independently based on streaming demand.  
+- **Front Service (Message Handler):** A lightweight service that accepts client questions over HTTP, creates durable run metadata in Redis, records cancellation intent, and queues messages for processing. Handles user authentication and session/thread management.
+- **SSE Service (Streaming Service):** A dedicated service that handles Server-Sent Events connections and streams typed run events from Redis Streams. This service can be scaled independently based on streaming demand and supports `Last-Event-ID` replay.
 - **Message Queue Service:** A persistent FIFO queue (with partitions or sessions by conversation ID) that brokers requests and responses between services. Includes multiple topics: `user-messages`, `token-streams`, and `message-completed`.  
 - **Worker Service (Async Workers):** A pool of one or more back-end worker processes that consume tasks from the queue. Each worker retrieves conversation history from Redis and, for new conversations, fetches long-term user memory from the Memory API to personalize the system prompt. The worker calls the LLM API with context-aware prompts **and function calling capabilities**, enabling the LLM to dynamically search previous conversations via semantic search. The worker synchronously updates Redis with new messages for immediate consistency and publishes completed conversations for memory processing and long-term storage. Memory API calls have a 2-second timeout to ensure system reliability - if memory is unavailable, the worker continues with a basic system prompt.  
-- **Azure Managed Redis (Hot Cache):** Fast lookup storage for active conversation history with 24-hour TTL. Workers write directly to Redis synchronously to ensure immediate consistency for ongoing conversations. Optimized for LLM worker performance with dual indexing strategy.  
+- **Azure Managed Redis (Hot Cache):** Fast lookup storage for active conversation history, run metadata, cancellation flags, and `run:{runId}:events` Redis Streams with TTL/maxlen. Workers write directly to Redis synchronously to ensure immediate consistency for ongoing conversations and replayable UI events.
 - **Azure Cosmos DB (Long-term Store):** Persistent storage for conversation history with configurable retention. Provides multi-region capabilities and serves as the authoritative source for historical conversations beyond the Redis cache window. Also used for storing and querying long-term user memories.
 - **History Worker:** Listens to `message-completed` events and **persists** conversations to Cosmos DB, generates titles.
 - **History API:** Stateless REST service that **serves history to the web client** (`GET /conversations`, `GET /messages`, `PUT /title`). Reads recent data from Redis, full history from Cosmos DB.
@@ -68,10 +77,12 @@ flowchart LR
     MemoryWorker -->|fetch conversation| Redis
     MemoryWorker -->|update memory| MemoryAPI
 
-    Worker -->|stream tokens| TokenTopic[[token-streams topic]]
+    Worker -->|typed run events| Redis
+    Worker -->|legacy token stream| TokenTopic[[token-streams topic]]
     Worker -->|completed message| CompletedTopic[[message-completed topic]]
-    TokenTopic -->|tokens| SSE
-    SSE -->|SSE stream| Client    
+    TokenTopic -->|compat tokens| SSE
+    Redis -->|replay run events| SSE
+    SSE -->|SSE run event stream| Client
     subgraph HistoryService["History Service"]
         HistoryWorker[History Worker]
         HistoryAPI[History API]
@@ -400,4 +411,3 @@ sequenceDiagram
 - `search_conversation_history(search_query, limit)`: Performs semantic search through user's previous conversations, returning summaries with themes, sentiment analysis, and relevance scores
 
 *This capability transforms the chat experience from session-isolated interactions to a truly contextual, memory-aware conversation system.*
-

@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/memory_api
         push: true
-        tags: ghcr.io/${{ github.repository }}/memory-api:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/memory-api:latest
+          ghcr.io/${{ github.repository }}/memory-api:${{ github.sha }}

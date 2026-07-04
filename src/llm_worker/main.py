@@ -43,6 +43,7 @@ from openai import AsyncAzureOpenAI
 import redis.asyncio as redis
 from redis_entraid.cred_provider import create_from_default_azure_credential
 from jinja2 import Environment, FileSystemLoader
+from protocol import build_event, utc_now
 
 
 # Load .env in development
@@ -203,6 +204,8 @@ if not AZURE_OPENAI_DEPLOYMENT_NAME:
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6380))
 REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() == "true"
+RUN_TTL_SECONDS = int(os.getenv("RUN_TTL_SECONDS", str(24 * 60 * 60)))
+RUN_EVENTS_MAXLEN = int(os.getenv("RUN_EVENTS_MAXLEN", "10000"))
 
 if not REDIS_HOST:
     raise RuntimeError("Missing required environment variable REDIS_HOST")
@@ -423,10 +426,88 @@ async def publish_message_completed_event(sb_client: ServiceBusClient, session_i
         logger.error(f"Error publishing message-completed event for session {session_id}, chatMessageId {chat_message_id}: {e}")
         # Don't raise the exception as this shouldn't stop the main processing flow
 
+
+def _run_key(run_id: str) -> str:
+    return f"run:{run_id}"
+
+
+def _run_events_key(run_id: str) -> str:
+    return f"run:{run_id}:events"
+
+
+async def update_run_metadata(run_id: str, **updates):
+    """
+    Update run metadata in Redis while preserving existing fields.
+    """
+    run_data = await redis_client.get(_run_key(run_id))
+    run = json.loads(run_data) if run_data else {"id": run_id, "runId": run_id}
+    run.update({key: value for key, value in updates.items() if value is not None})
+    await redis_client.setex(_run_key(run_id), RUN_TTL_SECONDS, json.dumps(run, ensure_ascii=False))
+
+
+async def append_run_event(run_id: str, thread_id: str, event_type: str, **payload) -> dict:
+    """
+    Append a typed agent UI event to the Redis Stream for a run.
+    """
+    sequence = await redis_client.incr(f"run:{run_id}:sequence")
+    event = build_event(event_type, run_id, thread_id, int(sequence), **payload)
+    await redis_client.xadd(
+        _run_events_key(run_id),
+        {"data": json.dumps(event, ensure_ascii=False, separators=(",", ":"))},
+        maxlen=RUN_EVENTS_MAXLEN,
+        approximate=True,
+    )
+    await redis_client.expire(_run_events_key(run_id), RUN_TTL_SECONDS)
+    await update_run_metadata(run_id, lastSequence=int(sequence))
+    return event
+
+
+async def is_cancel_requested(run_id: str) -> bool:
+    """
+    Return true when a client explicitly requested cancellation for the run.
+    """
+    return bool(await redis_client.get(f"run:{run_id}:cancel_requested"))
+
+
+async def publish_legacy_token(sender, session_id: str, chat_message_id: str, token: str) -> None:
+    """
+    Publish a legacy token-stream message for old clients.
+    """
+    token_payload = {
+        "sessionId": session_id,
+        "chatMessageId": chat_message_id,
+        "token": token,
+    }
+    token_message = ServiceBusMessage(
+        body=json.dumps(token_payload),
+        session_id=session_id,
+    )
+    await sender.send_messages(token_message)
+
+
+async def publish_legacy_eos(sender, session_id: str, chat_message_id: str) -> None:
+    """
+    Publish the legacy end-of-stream sentinel for old clients.
+    """
+    eos_payload = {"sessionId": session_id, "chatMessageId": chat_message_id, "end_of_stream": True}
+    eos_message = ServiceBusMessage(body=json.dumps(eos_payload), session_id=session_id)
+    await sender.send_messages(eos_message)
+
+
+async def cancel_run(run_id: str, thread_id: str) -> None:
+    """
+    Mark a run cancelled and emit the terminal cancellation event.
+    """
+    await update_run_metadata(run_id, status="cancelled", completedAt=utc_now())
+    await append_run_event(run_id, thread_id, "RunCancelled", status="cancelled")
+
 async def process_message(sb_client: ServiceBusClient, service_bus_message):
     """
-    Handle a single user message: parse, call LLM, and stream tokens to the token streams topic.
+    Handle a single user message: parse, call LLM, and append typed run events.
     """
+    run_id = None
+    thread_id = None
+    message_body_str = ""
     try:
         message_body_str = str(service_bus_message)
         logger.info(f"Received message: {message_body_str}")
@@ -436,10 +517,12 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
         session_id = message_data.get("sessionId")
         chat_message_id = message_data.get("chatMessageId")
         user_id = message_data.get("userId")
+        run_id = message_data.get("runId") or f"run_{chat_message_id}"
+        thread_id = message_data.get("threadId") or session_id
+        assistant_message_id = f"{chat_message_id}_assistant"
 
-        if not all([user_text, session_id, chat_message_id]):
-            logger.error(f"Message missing required fields (text, sessionId, chatMessageId): {message_data}")
-            # Depending on requirements, might dead-letter this message
+        if not all([user_text, session_id, chat_message_id, run_id, thread_id]):
+            logger.error(f"Message missing required fields (text, sessionId, chatMessageId, runId/threadId): {message_data}")
             return
         
         # Set context variables so all spans in this operation will include these attributes
@@ -455,12 +538,23 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             if span.is_recording():
                 span.set_attribute("app.operation", "process_user_message")
                 span.set_attribute("app.user_text_length", len(user_text))
-            
+                span.set_attribute("app.run_id", run_id)
+                span.set_attribute("app.thread_id", thread_id)
+
             logger.info(f"Processing chatMessageId: {chat_message_id} for sessionId: {session_id}, userId: {user_id} - Text: '{user_text}'")
-            
+
+            await update_run_metadata(run_id, status="running", startedAt=utc_now())
+            await append_run_event(run_id, thread_id, "RunStarted", status="running")
+            await append_run_event(run_id, thread_id, "TextMessageStart", messageId=assistant_message_id, role="assistant")
+
+            if await is_cancel_requested(run_id):
+                await cancel_run(run_id, thread_id)
+                return
+
             # Get conversation history from Redis
             conversation_history = await get_conversation_history(session_id, user_id)
-              # Build messages for LLM
+
+            # Build messages for LLM
             messages = []
             # Check if history already starts with a system message
             has_system_message_in_history = (
@@ -492,8 +586,12 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
             logger.debug(f"Built messages for LLM: {len(messages)} total messages")
             # Debug: Log the complete messages array as JSON
             logger.debug(f"Messages sent to LLM: {json.dumps(messages, indent=2, default=str)}")
-            
+
             logger.info(f"Calling LLM with {len(messages)} messages (including system message and history)")
+            if await is_cancel_requested(run_id):
+                await cancel_run(run_id, thread_id)
+                return
+
             stream = await chat_client.chat.completions.create(
                 model=AZURE_OPENAI_DEPLOYMENT_NAME,
                 messages=messages,
@@ -502,74 +600,97 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                 tools=[conversation_search_tool],
                 tool_choice="auto",
                 temperature=0.7
-            )        # Collect the full assistant response and handle function calls
+            )
+
+        # Collect the full assistant response and handle function calls
         assistant_response_tokens = []
-        function_calls = {} 
+        function_calls = {}
         usage_info = None
-        
+        run_terminal_sent = False
+
         async with sb_client.get_topic_sender(SERVICEBUS_TOKEN_STREAMS_TOPIC) as sender:
             async for chunk in stream:
-                # Handle token usage information (final chunk)
+                if await is_cancel_requested(run_id):
+                   await cancel_run(run_id, thread_id)
+                   await publish_legacy_eos(sender, session_id, chat_message_id)
+                   run_terminal_sent = True
+                   return
+
                 if chunk.usage:
-                    usage_info = chunk.usage
-                    logger.info(f"Token usage: input={chunk.usage.prompt_tokens}, output={chunk.usage.completion_tokens}, total={chunk.usage.total_tokens}")
-                
+                   usage_info = chunk.usage
+                   usage_payload = {
+                       "inputTokens": chunk.usage.prompt_tokens,
+                       "outputTokens": chunk.usage.completion_tokens,
+                       "totalTokens": chunk.usage.total_tokens,
+                   }
+                   await append_run_event(run_id, thread_id, "Usage", usage=usage_payload)
+                   await update_run_metadata(run_id, usage=usage_payload)
+                   logger.info(f"Token usage: input={chunk.usage.prompt_tokens}, output={chunk.usage.completion_tokens}, total={chunk.usage.total_tokens}")
+
                 if chunk.choices and len(chunk.choices) > 0:
-                    choice = chunk.choices[0]
-                    delta = choice.delta
-                    
-                    # Handle regular content
-                    if delta.content:
-                        content_chunk = delta.content
-                        assistant_response_tokens.append(content_chunk)
-                        
-                        token_payload = {
-                            "sessionId": session_id,
-                            "chatMessageId": chat_message_id,
-                            "token": content_chunk
-                        }
-                        token_message = ServiceBusMessage(
-                            body=json.dumps(token_payload),
-                            session_id=session_id
-                        )
-                        await sender.send_messages(token_message)
-                        logger.debug(f"Sent token chunk: {content_chunk}")
-                      # Handle function calls (accumulate arguments for each tool call)
-                    if delta.tool_calls:
-                        for tool_call in delta.tool_calls:
-                            logger.debug(f"Tool call delta: index={tool_call.index}, id={tool_call.id}, function={tool_call.function}")
-                            
-                            # Always use index as the primary key for tracking tool calls
-                            tool_call_index = tool_call.index
-                            
-                            if tool_call_index not in function_calls:
-                                function_calls[tool_call_index] = {
-                                    "id": "",
-                                    "index": tool_call_index,
-                                    "name": "",
-                                    "arguments": ""
-                                }
-                                logger.debug(f"Initialized function call at index {tool_call_index}")
-                            
-                            # Update ID if provided in this chunk
-                            if tool_call.id:
-                                function_calls[tool_call_index]["id"] = tool_call.id
-                                logger.debug(f"Set ID for tool call {tool_call_index}: {tool_call.id}")
-                            
-                            if tool_call.function:
-                                if tool_call.function.name:
-                                    function_calls[tool_call_index]["name"] = tool_call.function.name
-                                    logger.info(f"Function call detected at index {tool_call_index}: {tool_call.function.name}")
-                                
-                                if tool_call.function.arguments is not None:
-                                    logger.debug(f"Adding arguments chunk: '{tool_call.function.arguments}' to call index {tool_call_index}")
-                                    function_calls[tool_call_index]["arguments"] += tool_call.function.arguments
-                                    logger.debug(f"Current accumulated arguments for index {tool_call_index}: '{function_calls[tool_call_index]['arguments']}'")
-                  # Process function calls if any
+                   choice = chunk.choices[0]
+                   delta = choice.delta
+
+                   if delta.content:
+                       content_chunk = delta.content
+                       assistant_response_tokens.append(content_chunk)
+                       await append_run_event(
+                           run_id,
+                           thread_id,
+                           "TextMessageContent",
+                           messageId=assistant_message_id,
+                           delta=content_chunk,
+                       )
+                       await publish_legacy_token(sender, session_id, chat_message_id, content_chunk)
+                       logger.debug(f"Sent token chunk: {content_chunk}")
+
+                   if delta.tool_calls:
+                       for tool_call in delta.tool_calls:
+                           logger.debug(f"Tool call delta: index={tool_call.index}, id={tool_call.id}, function={tool_call.function}")
+
+                           tool_call_index = tool_call.index
+                           if tool_call_index not in function_calls:
+                               function_calls[tool_call_index] = {
+                                   "id": "",
+                                   "index": tool_call_index,
+                                   "name": "",
+                                   "arguments": "",
+                                   "started": False,
+                               }
+                               logger.debug(f"Initialized function call at index {tool_call_index}")
+
+                           if tool_call.id:
+                               function_calls[tool_call_index]["id"] = tool_call.id
+
+                           if tool_call.function:
+                               if tool_call.function.name:
+                                   function_calls[tool_call_index]["name"] = tool_call.function.name
+                                   if not function_calls[tool_call_index]["started"]:
+                                       await append_run_event(
+                                           run_id,
+                                           thread_id,
+                                           "ToolCallStart",
+                                           messageId=assistant_message_id,
+                                           toolCallId=function_calls[tool_call_index]["id"] or f"call_index_{tool_call_index}",
+                                           name=tool_call.function.name,
+                                       )
+                                       function_calls[tool_call_index]["started"] = True
+
+                               if tool_call.function.arguments is not None:
+                                   function_calls[tool_call_index]["arguments"] += tool_call.function.arguments
+                                   await append_run_event(
+                                       run_id,
+                                       thread_id,
+                                       "ToolCallArgs",
+                                       messageId=assistant_message_id,
+                                       toolCallId=function_calls[tool_call_index]["id"] or f"call_index_{tool_call_index}",
+                                       delta=tool_call.function.arguments,
+                                   )
+
             if function_calls:
                 logger.info(f"Processing {len(function_calls)} function calls")
                 logger.debug(f"Complete function calls state: {function_calls}")
-                
+
                 # Convert function_calls dict to list for processing
                 function_calls_list = list(function_calls.values())
                   # Log each function call for debugging
@@ -581,7 +702,18 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                     # If ID is empty, generate one based on index
                     if not func_call["id"] or func_call["id"].strip() == "":
                         func_call["id"] = f"call_index_{func_call['index']}"
-                        logger.debug(f"Generated ID for tool call at index {func_call['index']}: {func_call['id']}")                # Create assistant message with tool calls first
+                        logger.debug(f"Generated ID for tool call at index {func_call['index']}: {func_call['id']}")
+
+                    await append_run_event(
+                        run_id,
+                        thread_id,
+                        "ToolCallEnd",
+                        messageId=assistant_message_id,
+                        toolCallId=func_call["id"],
+                        name=func_call["name"],
+                    )
+
+                # Create assistant message with tool calls first
                 assistant_tool_calls = []
                 for func_call in function_calls_list:
                     # Only include tool calls that have a valid function name
@@ -611,65 +743,105 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                         "tool_calls": assistant_tool_calls
                     }
                     messages.append(assistant_message)
-                    logger.debug(f"Added assistant message with {len(assistant_tool_calls)} tool calls")                    # Execute function calls and add tool responses
+                    logger.debug(f"Added assistant message with {len(assistant_tool_calls)} tool calls")
+
+                    # Execute function calls and add tool responses
                     for func_call in function_calls_list:
-                        # Skip tool calls with empty names (IDs are guaranteed to be set by post-processing)
-                        if not func_call["name"] or func_call["name"].strip() == "":
-                            logger.warning(f"Skipping invalid tool call during execution: {func_call}")
-                            continue                            
-                        logger.debug(f"Processing function call: {func_call}")
-                        if func_call["name"] == "search_conversation_history":
-                            try:
-                                logger.debug(f"Raw function arguments: '{func_call['arguments']}'")
-                                
-                                # Parse arguments with better error handling
-                                if not func_call["arguments"] or func_call["arguments"].strip() == "":
-                                    logger.warning(f"Empty arguments for search_conversation_history call: {func_call}")
-                                    args = {}
-                                else:
-                                    try:
-                                        args = json.loads(func_call["arguments"])
-                                    except json.JSONDecodeError as parse_error:
-                                        logger.error(f"Failed to parse JSON arguments '{func_call['arguments']}': {parse_error}")
-                                        raise parse_error
-                                
-                                search_query = args.get("search_query", "")
-                                limit = args.get("limit", 5)
-                                
-                                logger.info(f"Executing conversation search: query='{search_query}', limit={limit}")
-                                
-                                # Execute the search
-                                search_result = await search_conversation_history(user_id, search_query, limit)
-                                
-                                # Add tool message to conversation
-                                tool_message = {
-                                    "role": "tool",
-                                    "content": json.dumps(search_result, indent=2),
-                                    "tool_call_id": func_call["id"]
-                                }
-                                messages.append(tool_message)
-                                
-                                logger.info(f"Function call result: Found {search_result.get('total_found', 0)} conversations")
-                                
-                            except json.JSONDecodeError as e:
-                                logger.error(f"Error parsing function arguments '{func_call['arguments']}': {e}")
-                                error_message = {
-                                    "role": "tool",
-                                    "content": json.dumps({"error": f"Invalid function arguments: {str(e)}"}),
-                                    "tool_call_id": func_call["id"]
-                                }
-                                messages.append(error_message)
-                            except Exception as e:
-                                logger.error(f"Error executing function call: {e}")
-                                error_message = {
-                                    "role": "tool", 
-                                    "content": json.dumps({"error": str(e)}),
-                                    "tool_call_id": func_call["id"]
-                                }
-                                messages.append(error_message)
+                       if await is_cancel_requested(run_id):
+                           await cancel_run(run_id, thread_id)
+                           await publish_legacy_eos(sender, session_id, chat_message_id)
+                           run_terminal_sent = True
+                           return
+
+                       # Skip tool calls with empty names (IDs are guaranteed to be set by post-processing)
+                       if not func_call["name"] or func_call["name"].strip() == "":
+                           logger.warning(f"Skipping invalid tool call during execution: {func_call}")
+                           continue
+                       logger.debug(f"Processing function call: {func_call}")
+
+                       if func_call["name"] == "search_conversation_history":
+                           try:
+                               logger.debug(f"Raw function arguments: '{func_call['arguments']}'")
+
+                               # Parse arguments with better error handling
+                               if not func_call["arguments"] or func_call["arguments"].strip() == "":
+                                   logger.warning(f"Empty arguments for search_conversation_history call: {func_call}")
+                                   args = {}
+                               else:
+                                   try:
+                                       args = json.loads(func_call["arguments"])
+                                   except json.JSONDecodeError as parse_error:
+                                       logger.error(f"Failed to parse JSON arguments '{func_call['arguments']}': {parse_error}")
+                                       raise parse_error
+
+                               search_query = args.get("search_query", "")
+                               limit = args.get("limit", 5)
+
+                               logger.info(f"Executing conversation search: query='{search_query}', limit={limit}")
+
+                               # Execute the search
+                               search_result = await search_conversation_history(user_id, search_query, limit)
+                               await append_run_event(
+                                   run_id,
+                                   thread_id,
+                                   "ToolCallResult",
+                                   messageId=assistant_message_id,
+                                   toolCallId=func_call["id"],
+                                   result=search_result,
+                               )
+
+                               # Add tool message to conversation
+                               tool_message = {
+                                   "role": "tool",
+                                   "content": json.dumps(search_result, indent=2),
+                                   "tool_call_id": func_call["id"],
+                               }
+                               messages.append(tool_message)
+
+                               logger.info(f"Function call result: Found {search_result.get('total_found', 0)} conversations")
+
+                           except json.JSONDecodeError as e:
+                               logger.error(f"Error parsing function arguments '{func_call['arguments']}': {e}")
+                               error_payload = {"message": f"Invalid function arguments: {str(e)}"}
+                               await append_run_event(
+                                   run_id,
+                                   thread_id,
+                                   "ToolCallResult",
+                                   messageId=assistant_message_id,
+                                   toolCallId=func_call["id"],
+                                   error=error_payload,
+                               )
+                               error_message = {
+                                   "role": "tool",
+                                   "content": json.dumps({"error": f"Invalid function arguments: {str(e)}"}),
+                                   "tool_call_id": func_call["id"],
+                               }
+                               messages.append(error_message)
+                           except Exception as e:
+                               logger.error(f"Error executing function call: {e}")
+                               await append_run_event(
+                                   run_id,
+                                   thread_id,
+                                   "ToolCallResult",
+                                   messageId=assistant_message_id,
+                                   toolCallId=func_call["id"],
+                                   error={"message": str(e)},
+                               )
+                               error_message = {
+                                   "role": "tool",
+                                   "content": json.dumps({"error": str(e)}),
+                                   "tool_call_id": func_call["id"],
+                               }
+                               messages.append(error_message)
                     
                     # Make another LLM call with the function results
                     logger.info("Making follow-up LLM call with function results")
+                    if await is_cancel_requested(run_id):
+                        await cancel_run(run_id, thread_id)
+                        await publish_legacy_eos(sender, session_id, chat_message_id)
+                        run_terminal_sent = True
+                        return
+
                     followup_stream = await chat_client.chat.completions.create(
                         model=AZURE_OPENAI_DEPLOYMENT_NAME,
                         messages=messages,
@@ -681,32 +853,42 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                     )                
                     # Process the follow-up response
                     async for chunk in followup_stream:
+                        if await is_cancel_requested(run_id):
+                            await cancel_run(run_id, thread_id)
+                            await publish_legacy_eos(sender, session_id, chat_message_id)
+                            run_terminal_sent = True
+                            return
+
                         if chunk.usage:
                             usage_info = chunk.usage  # Update usage info with follow-up call
+                            usage_payload = {
+                                "inputTokens": chunk.usage.prompt_tokens,
+                                "outputTokens": chunk.usage.completion_tokens,
+                                "totalTokens": chunk.usage.total_tokens,
+                            }
+                            await append_run_event(run_id, thread_id, "Usage", usage=usage_payload)
+                            await update_run_metadata(run_id, usage=usage_payload)
                             logger.info(f"Follow-up Token usage: input={chunk.usage.prompt_tokens}, output={chunk.usage.completion_tokens}, total={chunk.usage.total_tokens}")
-                        
+
                         if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta and chunk.choices[0].delta.content:
                             content_chunk = chunk.choices[0].delta.content
                             assistant_response_tokens.append(content_chunk)
-                            
-                            token_payload = {
-                                "sessionId": session_id,
-                                "chatMessageId": chat_message_id,
-                                "token": content_chunk
-                            }
-                            token_message = ServiceBusMessage(
-                                body=json.dumps(token_payload),
-                                session_id=session_id
+                            await append_run_event(
+                                run_id,
+                                thread_id,
+                                "TextMessageContent",
+                                messageId=assistant_message_id,
+                                delta=content_chunk,
                             )
-                            await sender.send_messages(token_message)
+                            await publish_legacy_token(sender, session_id, chat_message_id, content_chunk)
                             logger.debug(f"Sent follow-up token chunk: {content_chunk}")
-            
-            # Send end-of-stream sentinel
-            eos_payload = {"sessionId": session_id, "chatMessageId": chat_message_id, "end_of_stream": True}
-            eos_message = ServiceBusMessage(body=json.dumps(eos_payload), session_id=session_id)
-            await sender.send_messages(eos_message)
+
+            await append_run_event(run_id, thread_id, "TextMessageEnd", messageId=assistant_message_id)
+            await append_run_event(run_id, thread_id, "RunFinished", status="completed")
+            await publish_legacy_eos(sender, session_id, chat_message_id)
+            run_terminal_sent = True
             logger.info(f"Sent end-of-stream for chatMessageId {chat_message_id}")
-        
+
         # Update conversation history in Redis with the complete interaction
         assistant_response = "".join(assistant_response_tokens)
         
@@ -723,6 +905,12 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
         )
           # Publish message-completed event for downstream processing (history, memory, etc.)
         await publish_message_completed_event(sb_client, session_id, user_id, chat_message_id)
+        await update_run_metadata(
+           run_id,
+           status="completed",
+           completedAt=utc_now(),
+           outputSummary=assistant_response[:500],
+        )
 
     except json.JSONDecodeError as e:
         # Create an error span that will also get context attributes
@@ -733,11 +921,26 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
         logger.error(f"Failed to decode JSON from user message: {message_body_str}, error: {e}")
         # Potentially dead-letter the message
     except Exception as e:
+        if run_id and thread_id and redis_client:
+            try:
+                await update_run_metadata(run_id, status="failed", completedAt=utc_now())
+                await append_run_event(
+                    run_id,
+                    thread_id,
+                    "RunError",
+                    error={"message": str(e)},
+                    status="failed",
+                )
+            except Exception as event_error:
+                logger.error(f"Failed to emit RunError for run {run_id}: {event_error}")
+
         # Create an error span that will also get context attributes
         with tracer.start_as_current_span("process_message_error") as error_span:
             if error_span.is_recording():
                 error_span.set_attribute("app.error", "processing_error")
                 error_span.set_attribute("app.operation", "process_message")
+                if run_id:
+                    error_span.set_attribute("app.run_id", run_id)
         logger.error(f"Error processing message (id: {service_bus_message.message_id if service_bus_message else 'N/A'}): {e}")
         # Potentially re-raise or handle to allow the message to be abandoned/dead-lettered by the caller
         raise
