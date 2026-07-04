@@ -651,9 +651,11 @@ async def create_declarative_artifact(run_id: str, thread_id: str, user_id: str,
     if should_generate_sales_artifact(user_text):
         artifact = build_sales_artifact()
         blob_filename = "widget.json"
+        provenance_tool = "generate_sales_artifact"
     elif should_generate_micro_app(user_text):
         artifact = build_kanban_micro_app_artifact()
         blob_filename = "app.json"
+        provenance_tool = "generate_kanban_micro_app"
     else:
         return
     if not blob_service_client:
@@ -686,7 +688,7 @@ async def create_declarative_artifact(run_id: str, thread_id: str, user_id: str,
         },
         "provenance": {
             "model": AZURE_OPENAI_DEPLOYMENT_NAME,
-            "tool": "generate_sales_artifact",
+            "tool": provenance_tool,
         },
     }
 

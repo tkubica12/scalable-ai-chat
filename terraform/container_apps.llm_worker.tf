@@ -71,6 +71,10 @@ resource "azapi_resource" "llm_worker" {
                 value = "true"
               },
               {
+                name  = "APP_VERSION"
+                value = "20260704-refactor-complete"
+              },
+              {
                 name  = "AZURE_OPENAI_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
               },
