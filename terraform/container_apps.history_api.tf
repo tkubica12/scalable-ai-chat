@@ -18,7 +18,7 @@ resource "azapi_resource" "history_api" {
         ingress = {
           external      = true
           targetPort    = 8005
-          transport     = "http"
+          transport     = "Http"
           allowInsecure = false
           traffic = [
             {

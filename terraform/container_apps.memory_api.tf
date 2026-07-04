@@ -18,7 +18,7 @@ resource "azapi_resource" "memory_api" {
         ingress = {
           external      = true
           targetPort    = 8003
-          transport     = "http"
+          transport     = "Http"
           allowInsecure = false
           traffic = [
             {

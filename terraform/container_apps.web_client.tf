@@ -47,19 +47,19 @@ resource "azapi_resource" "web_client" {
             env = [
               {
                 name  = "API_URL"
-                value = "https://${azapi_resource.front_service.output.properties.configuration.ingress.fqdn}"
+                value = local.front_service_url
               },
               {
                 name  = "SSE_URL"
-                value = "https://${azapi_resource.sse_service.output.properties.configuration.ingress.fqdn}"
+                value = local.sse_service_url
               },
               {
                 name  = "HISTORY_API_URL"
-                value = "https://${azapi_resource.history_api.output.properties.configuration.ingress.fqdn}"
+                value = local.history_api_url
               },
               {
                 name  = "MEMORY_API_URL"
-                value = "https://${azapi_resource.memory_api.output.properties.configuration.ingress.fqdn}"
+                value = local.memory_api_url
               },
             ]
           }

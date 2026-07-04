@@ -38,6 +38,9 @@ resource "azapi_resource" "memory_conversations" {
           excludedPaths = [
             {
               path = "/vector_embedding/*"
+            },
+            {
+              path = "/\"_etag\"/?"
             }
           ]
           vectorIndexes = [

@@ -96,7 +96,7 @@ resource "azapi_resource" "llm_worker" {
               },
               {
                 name  = "MEMORY_API_ENDPOINT"
-                value = "https://${azapi_resource.memory_api.output.properties.configuration.ingress.fqdn}"
+                value = local.memory_api_url
               },
               {
                 name  = "MEMORY_API_TIMEOUT"
