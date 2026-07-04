@@ -24,6 +24,8 @@ resource "azapi_resource" "redis_access_history_worker" {
       }
     }
   }
+
+  depends_on = [azapi_resource.redis_access_self]
 }
 
 resource "azapi_resource" "redis_access_memory_worker" {
@@ -38,6 +40,8 @@ resource "azapi_resource" "redis_access_memory_worker" {
       }
     }
   }
+
+  depends_on = [azapi_resource.redis_access_history_worker]
 }
 
 resource "azapi_resource" "redis_access_llm_worker" {
@@ -52,6 +56,8 @@ resource "azapi_resource" "redis_access_llm_worker" {
       }
     }
   }
+
+  depends_on = [azapi_resource.redis_access_memory_worker]
 }
 
 resource "azapi_resource" "redis_access_front_service" {
@@ -66,6 +72,8 @@ resource "azapi_resource" "redis_access_front_service" {
       }
     }
   }
+
+  depends_on = [azapi_resource.redis_access_llm_worker]
 }
 
 resource "azapi_resource" "redis_access_sse_service" {
@@ -80,4 +88,6 @@ resource "azapi_resource" "redis_access_sse_service" {
       }
     }
   }
+
+  depends_on = [azapi_resource.redis_access_front_service]
 }

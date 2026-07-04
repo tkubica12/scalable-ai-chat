@@ -1,12 +1,12 @@
 // Azure OpenAI models
 resource "azurerm_cognitive_deployment" "openai_model" {
-  name                 = "gpt-4.1-mini"
+  name                 = "gpt-5.4-mini"
   cognitive_account_id = azapi_resource.ai_service.id
 
   model {
     format  = "OpenAI"
-    name    = "gpt-4.1-mini"
-    version = "2025-04-14"
+    name    = "gpt-5.4-mini"
+    version = "2026-03-17"
   }
 
   sku {
@@ -31,4 +31,3 @@ resource "azurerm_cognitive_deployment" "embedding_model" {
     name     = "Standard"
   }
 }
-
