@@ -1,24 +1,38 @@
 # Scalable AI Chat
-This project aims to showcase key design patterns for building scalable AI chat applications. Most AI apps today start as monolithic applications that are difficult to scale. Most frameworks such as LangChain or Semantic Kernel tend to showcase examples that are not scalable. Although Lang Graph or Autogen come with modularity and scalability in mind, examples are still mostly monolithic. This repository is about learning architecture patterns, not about providing a complete solution or production-ready code.
 
-This repo is leveraging cloud scale-to-zero services in Azure, fully automated with Terraform and automated CI/CD pipelines using GitHub Actions. Code as well as documentation and architecture documents are build with help of GitHub Copilot and are meant to showcase how to leverage AI assistance and agents when building more complex applications beyond simple chatbots.
+This repository is a teaching demo for a scalable AI chat and agent runtime on Azure. It shows how to split a chat system into independently scalable parts: ingress, durable runs, event streaming, orchestration, memory, history, artifacts, observability, and infrastructure.
 
-## Current capabilities
+The demo uses Azure Container Apps, Service Bus, Redis Enterprise, Cosmos DB, Blob Storage, Microsoft Foundry with GPT-5.4-mini, managed identities, Terraform, and GitHub Actions.
 
-The chat path now uses a durable run abstraction in addition to the original compatibility endpoints. `front_service` exposes `POST /api/runs`, `GET /api/runs/{runId}`, `POST /api/runs/{runId}/cancel`, and `GET /api/artifacts/{artifactId}`; `sse_service` exposes `GET /api/runs/{runId}/events` with replayable SSE frames backed by Redis Streams. The LLM worker emits typed AG-UI-shaped lifecycle, text, tool, usage, safety, artifact, cancellation, and error events while still publishing the legacy token stream during migration.
+## What this demonstrates
 
-Container build workflows publish both `latest` and immutable `${{ github.sha }}` GHCR tags. Terraform provisions Azure Container Apps, Service Bus, Redis, Cosmos DB vector containers, private Blob artifact storage, and the newer Microsoft Foundry resource/project model with GPT-5.4-mini.
+- **Durable runs:** every chat turn is a `run` with state, cancellation, ordered events, usage, safety verdicts, and artifact references.
+- **Replayable streaming:** the browser receives typed SSE events from Redis Streams and can reconnect with `Last-Event-ID`.
+- **Asynchronous orchestration:** Service Bus decouples user input from model execution and post-run processing.
+- **Memory and history:** Cosmos DB stores conversation history and vector-searchable memory; APIs expose both REST and MCP-style tools/resources.
+- **Rich artifacts:** controlled table/chart widgets and sandboxed micro-app artifacts are stored in private Blob Storage and rendered by the UI.
+- **Cloud-native operations:** all Azure resources are created with Terraform and all container images are built by GitHub Actions with immutable SHA tags.
 
-MCP migration has started with `/mcp` JSON-RPC endpoints on Memory API and History API. A parallel `src/agent_client` Next.js/CopilotKit scaffold validates the CopilotKit migration path without replacing the deployed Svelte client.
+## Documentation
 
-## [Architecture](./docs/Architecture.md)
-Architecture overview of the project, evolving together with the code (in fact, architecture is created first and then used as context for GitHub Copilot when doing AI-assisted development).
+- [Architecture](./docs/Architecture.md) - why the system is split this way and how the pieces interact.
+- [Contracts](./docs/Contracts.md) - run API, event taxonomy, artifact profile, MCP tools, and stored data shapes.
+- [How to run](./docs/HowToRun.md) - local validation, image builds, Terraform deployment, and smoke tests.
+- [Observability](./docs/Observability.md) - telemetry model and useful KQL queries.
 
-## [How to run](./docs/HowToRun.md)
-Instructions on how to deploy and run the project, including Terraform deployment to Azure and local testing.
+## Repository layout
 
-## Results
-TBD
-
-## Using GitHub Copilot in more complex projects
-TBD
+```text
+src/
+  front_service/   Public run, cancel, and artifact API
+  sse_service/     Replayable Server-Sent Events from Redis Streams
+  llm_worker/      Agent runtime, model calls, tools, safety, artifacts
+  memory_api/      Memory REST API and MCP endpoint
+  memory_worker/   Conversation-to-memory processing
+  history_api/     Conversation history REST API and MCP endpoint
+  history_worker/  Long-term conversation persistence
+  web_client/      Browser demo UI
+  agent_client/    CopilotKit/Next.js agent UI scaffold
+terraform/         Azure infrastructure
+docs/              Human docs and protocol contracts
+```
