@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from azure.identity import DefaultAzureCredential
@@ -62,6 +62,8 @@ app = FastAPI(
 # Configure CORS
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 allowed_origins = [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
+MCP_ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("MCP_ALLOWED_ORIGINS", CORS_ORIGINS).split(",") if origin.strip()]
+MCP_REQUIRE_AUTH = os.getenv("MCP_REQUIRE_AUTH", "false").lower() == "true"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -92,6 +94,14 @@ class ConversationDetail(BaseModel):
 
 class UpdateTitleRequest(BaseModel):
     title: str
+
+class McpRequest(BaseModel):
+    """Minimal JSON-RPC request body for the MCP Streamable HTTP endpoint."""
+
+    jsonrpc: str = "2.0"
+    id: Optional[str | int] = None
+    method: str
+    params: Dict[str, Any] = {}
 
 # Helper functions
 def get_conversation_from_cosmos(session_id: str) -> Optional[Dict]:
@@ -142,11 +152,122 @@ def update_conversation_title_in_cosmos(session_id: str, title: str) -> bool:
         logger.error(f"Failed to update title for conversation {session_id}: {e}")
         return False
 
+def validate_mcp_request_security(request: Request) -> None:
+    """Validate MCP origin and optional auth requirements."""
+    origin = request.headers.get("origin")
+    if origin and "*" not in MCP_ALLOWED_ORIGINS and origin not in MCP_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="Origin is not allowed for MCP access")
+    if MCP_REQUIRE_AUTH and not (request.headers.get("authorization") or request.headers.get("x-ms-client-principal")):
+        raise HTTPException(status_code=401, detail="MCP access requires authenticated caller context")
+
+def mcp_result(request_id: Optional[str | int], result: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a JSON-RPC success response."""
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+def mcp_error(request_id: Optional[str | int], code: int, message: str) -> Dict[str, Any]:
+    """Build a JSON-RPC error response."""
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
 # API endpoints
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "history-api"}
+
+@app.get("/mcp")
+async def mcp_metadata():
+    """Return MCP endpoint metadata for discovery and health probes."""
+    return {
+        "service": "history-api",
+        "transport": "streamable-http-json-rpc",
+        "protocolVersion": "2025-11-25",
+        "tools": ["list_conversations", "get_conversation"],
+    }
+
+@app.post("/mcp")
+async def mcp_endpoint(rpc: McpRequest, request: Request):
+    """Handle minimal MCP JSON-RPC initialize, tool, and resource requests."""
+    validate_mcp_request_security(request)
+
+    if rpc.method == "initialize":
+        return mcp_result(rpc.id, {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}, "resources": {}},
+            "serverInfo": {"name": "scalable-chat-history-api", "version": "0.1.0"},
+        })
+
+    if rpc.method == "tools/list":
+        return mcp_result(rpc.id, {
+            "tools": [
+                {
+                    "name": "list_conversations",
+                    "description": "List conversations for a user.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"userId": {"type": "string"}, "limit": {"type": "integer"}},
+                        "required": ["userId"],
+                    },
+                },
+                {
+                    "name": "get_conversation",
+                    "description": "Get one conversation with messages.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"userId": {"type": "string"}, "sessionId": {"type": "string"}},
+                        "required": ["userId", "sessionId"],
+                    },
+                },
+            ]
+        })
+
+    if rpc.method == "tools/call":
+        tool_name = rpc.params.get("name")
+        arguments = rpc.params.get("arguments", {})
+        if tool_name == "list_conversations":
+            conversations = await get_user_conversations(arguments["userId"], int(arguments.get("limit", 50)))
+            payload = [conversation.model_dump(mode="json") for conversation in conversations]
+        elif tool_name == "get_conversation":
+            conversation = await get_conversation_messages(arguments["userId"], arguments["sessionId"])
+            payload = conversation.model_dump(mode="json")
+        else:
+            return mcp_error(rpc.id, -32601, f"Unknown tool: {tool_name}")
+        return mcp_result(rpc.id, {"content": [{"type": "json", "json": payload}]})
+
+    if rpc.method == "resources/list":
+        return mcp_result(rpc.id, {
+            "resources": [
+                {
+                    "uri": "history://users/{userId}/conversations",
+                    "name": "User conversations",
+                    "description": "Conversation list resource template.",
+                    "mimeType": "application/json",
+                },
+                {
+                    "uri": "history://users/{userId}/sessions/{sessionId}",
+                    "name": "Conversation detail",
+                    "description": "Conversation detail resource template.",
+                    "mimeType": "application/json",
+                },
+            ]
+        })
+
+    if rpc.method == "resources/read":
+        uri = rpc.params.get("uri", "")
+        if uri.startswith("history://users/") and uri.endswith("/conversations"):
+            user_id = uri.removeprefix("history://users/").removesuffix("/conversations")
+            conversations = await get_user_conversations(user_id)
+            payload = [conversation.model_dump(mode="json") for conversation in conversations]
+            return mcp_result(rpc.id, {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload)}]})
+
+        marker = "/sessions/"
+        if uri.startswith("history://users/") and marker in uri:
+            user_part, session_id = uri.removeprefix("history://users/").split(marker, 1)
+            conversation = await get_conversation_messages(user_part, session_id)
+            return mcp_result(rpc.id, {"contents": [{"uri": uri, "mimeType": "application/json", "text": conversation.model_dump_json()}]})
+
+        return mcp_error(rpc.id, -32602, "Unsupported history resource URI")
+
+    return mcp_error(rpc.id, -32601, f"Unsupported MCP method: {rpc.method}")
 
 @app.get("/conversations/{user_id}", response_model=List[Conversation])
 async def get_user_conversations(user_id: str, limit: int = 50):

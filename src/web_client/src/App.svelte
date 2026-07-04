@@ -27,6 +27,12 @@
   const MEMORY_API_URL = import.meta.env.MEMORY_API_URL || window._env_?.MEMORY_API_URL;
 
   onMount(async () => {
+    window.addEventListener('message', (event) => {
+      if (event.origin !== window.location.origin) {
+        console.warn('Rejected artifact message from unexpected origin:', event.origin);
+      }
+    });
+
     try {
       const response = await fetch(`${API_URL}/api/session/start`, { 
         method: 'POST',
@@ -273,6 +279,16 @@
               );
             }
 
+            if (event.type === 'ArtifactFinalized') {
+              const artifactResponse = await fetch(`${API_URL}${event.manifest.artifactUrl}`);
+              const artifactPayload = await artifactResponse.json();
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, artifacts: [...(msg.artifacts || []), artifactPayload.artifact] }
+                  : msg
+              );
+            }
+
             if (event.type === 'TextMessageContent' || event.type === 'ToolCallStart' || event.type === 'Usage') {
               messages = messages.map(msg =>
                 msg.id === assistantMessagePlaceholder.id
@@ -330,6 +346,14 @@
       console.error('Failed to cancel run:', error);
     }
   }
+
+  function formatCell(value) {
+    if (typeof value === 'number') {
+      return value.toLocaleString();
+    }
+    return value;
+  }
+
   async function toggleHistory() {
     // If opening the history panel, refresh the conversation list
     if (!showHistory) {
@@ -603,6 +627,62 @@
     margin-top: 0.35rem;
     font-size: 0.75rem;
     color: #666;
+  }
+  .artifact-card {
+    margin-top: 0.75rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+    padding: 1rem;
+  }
+  .artifact-card h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.95rem;
+  }
+  .artifact-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .artifact-table th,
+  .artifact-table td {
+    border-bottom: 1px solid #f1f3f4;
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+  }
+  .artifact-bars {
+    display: flex;
+    align-items: end;
+    gap: 0.4rem;
+    height: 120px;
+    border-left: 1px solid #e5e7eb;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.5rem;
+  }
+  .artifact-bar {
+    flex: 1;
+    background: #222;
+    border-radius: 4px 4px 0 0;
+    min-height: 4px;
+  }
+  .artifact-bar-labels {
+    display: flex;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: #666;
+    margin-top: 0.25rem;
+  }
+  .artifact-bar-labels span {
+    flex: 1;
+    text-align: center;
+  }
+  .artifact-frame {
+    width: 100%;
+    min-height: 220px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
   }
   .content {
     flex: 1;
@@ -1313,6 +1393,58 @@
                 Tokens: {message.usage.inputTokens} in / {message.usage.outputTokens} out
               </div>
             {/if}
+            {#each message.artifacts || [] as artifact}
+              <div class="artifact-card">
+                {#if artifact.kind === 'declarative-widget'}
+                  <h4>{artifact.surface.title}</h4>
+                  {#each artifact.surface.components as component}
+                    {#if component.type === 'Table'}
+                      <table class="artifact-table">
+                        <thead>
+                          <tr>
+                            {#each component.columns as column}
+                              <th>{column.label}</th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each component.rows as row}
+                            <tr>
+                              {#each component.columns as column}
+                                <td>{formatCell(row[column.key])}</td>
+                              {/each}
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    {:else if component.type === 'Chart'}
+                      <div class="artifact-bars">
+                        {#each component.data as row}
+                          <div
+                            class="artifact-bar"
+                            style={`height: ${(row[component.yKey] / Math.max(...component.data.map(item => item[component.yKey]))) * 100}%`}
+                            title={`${row[component.xKey]}: ${formatCell(row[component.yKey])}`}
+                          ></div>
+                        {/each}
+                      </div>
+                      <div class="artifact-bar-labels">
+                        {#each component.data as row}
+                          <span>{row[component.xKey].slice(0, 3)}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  {/each}
+                {:else if artifact.kind === 'sandboxed-app'}
+                  <h4>Sandboxed micro-app</h4>
+                  <iframe
+                    class="artifact-frame"
+                    title="Sandboxed artifact"
+                    sandbox="allow-scripts"
+                    srcdoc={artifact.html}
+                  ></iframe>
+                {/if}
+              </div>
+            {/each}
           </div>
         </div>
       {/each}

@@ -47,6 +47,9 @@ Legacy `/api/session/start`, `/api/chat`, and `/api/stream/{sessionId}/{chatMess
 - **Long-term Memory Stack:**
   - **Azure Cosmos DB:** Stores conversation summaries with vector embeddings (in a `conversations` collection) and structured user profile data (in a `user-memories` collection). Detailed data structures are described in the Memory Architecture section.
 - **LLM API (e.g., Azure OpenAI Service):** An external service that generates the chat response. Supports streaming output, function calling, and receives both conversation context and long-term user memories. Can dynamically request additional context through conversation search functions.
+- **Artifact Storage/API:** The LLM worker can generate controlled declarative widgets and sandboxed micro-app artifacts, persist them to a private Blob container, and emit artifact events. The Front Service reads artifacts through `GET /api/artifacts/{artifactId}`.
+- **MCP Endpoints:** Memory API and History API expose `/mcp` JSON-RPC endpoints for tool/resource access while keeping the existing REST endpoints.
+- **CopilotKit migration client:** `src/agent_client` is a parallel Next.js/CopilotKit scaffold with an adapter from repo-local PascalCase events to AG-UI-style event names.
 
 Below is a pair of diagrams illustrating the system:
 

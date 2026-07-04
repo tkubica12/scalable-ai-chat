@@ -28,6 +28,8 @@ import logging
 import signal
 import sys
 import aiohttp
+import hashlib
+import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +45,8 @@ from openai import AsyncAzureOpenAI
 import redis.asyncio as redis
 from redis_entraid.cred_provider import create_from_default_azure_credential
 from jinja2 import Environment, FileSystemLoader
+from azure.storage.blob import ContentSettings
+from azure.storage.blob.aio import BlobServiceClient
 from protocol import build_event, utc_now
 
 
@@ -206,6 +210,8 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6380))
 REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() == "true"
 RUN_TTL_SECONDS = int(os.getenv("RUN_TTL_SECONDS", str(24 * 60 * 60)))
 RUN_EVENTS_MAXLEN = int(os.getenv("RUN_EVENTS_MAXLEN", "10000"))
+STORAGE_ACCOUNT_URL = os.getenv("STORAGE_ACCOUNT_URL")
+ARTIFACTS_CONTAINER_NAME = os.getenv("ARTIFACTS_CONTAINER_NAME", "artifacts")
 
 if not REDIS_HOST:
     raise RuntimeError("Missing required environment variable REDIS_HOST")
@@ -229,6 +235,9 @@ chat_client = None
 
 # Global Redis client - will be initialized in main()
 redis_client = None
+
+# Global Blob Storage client - will be initialized in main()
+blob_service_client = None
 
 # Global shutdown event for graceful shutdown
 shutdown_event = asyncio.Event()
@@ -501,6 +510,219 @@ async def cancel_run(run_id: str, thread_id: str) -> None:
     await update_run_metadata(run_id, status="cancelled", completedAt=utc_now())
     await append_run_event(run_id, thread_id, "RunCancelled", status="cancelled")
 
+
+def should_generate_sales_artifact(user_text: str) -> bool:
+    """
+    Return true for the controlled demo prompt that asks for a sales table and chart.
+    """
+    normalized = user_text.lower()
+    return "sales" in normalized and "table" in normalized and "chart" in normalized
+
+
+def should_generate_micro_app(user_text: str) -> bool:
+    """
+    Return true for the controlled sandboxed micro-app demo prompt.
+    """
+    normalized = user_text.lower()
+    return "kanban" in normalized or "micro app" in normalized or "micro-app" in normalized
+
+
+def evaluate_input_safety(user_text: str) -> dict:
+    """
+    Evaluate lightweight demo safety signals before model execution.
+    """
+    normalized = user_text.lower()
+    jailbreak_markers = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "jailbreak",
+        "developer mode",
+        "disable safety",
+    ]
+    matched = [marker for marker in jailbreak_markers if marker in normalized]
+    return {
+        "inputVerdict": "blocked" if matched else "allowed",
+        "categories": {"jailbreak": bool(matched)},
+        "matchedSignals": matched,
+    }
+
+
+def build_sales_artifact() -> dict:
+    """
+    Build a deterministic declarative chart/table artifact for the demo.
+    """
+    rows = [
+        {"month": "January", "sales": 12000},
+        {"month": "February", "sales": 15400},
+        {"month": "March", "sales": 17100},
+        {"month": "April", "sales": 16800},
+        {"month": "May", "sales": 19250},
+        {"month": "June", "sales": 22100},
+    ]
+    return {
+        "kind": "declarative-widget",
+        "mimeType": "application/vnd.scalable-ai-chat.a2ui+json",
+        "version": "v1",
+        "surface": {
+            "title": "Example monthly sales",
+            "components": [
+                {
+                    "type": "Table",
+                    "columns": [
+                        {"key": "month", "label": "Month"},
+                        {"key": "sales", "label": "Sales"},
+                    ],
+                    "rows": rows,
+                },
+                {
+                    "type": "Chart",
+                    "chartType": "bar",
+                    "xKey": "month",
+                    "yKey": "sales",
+                    "data": rows,
+                },
+            ],
+        },
+    }
+
+
+def build_kanban_micro_app_artifact() -> dict:
+    """
+    Build a deterministic sandboxed HTML micro-app artifact for the demo.
+    """
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #f8fafc; color: #111827; }
+    .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .column { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; }
+    h2 { font-size: 14px; margin: 0 0 8px; }
+    .card { background: #f3f4f6; border-radius: 8px; padding: 8px; margin: 8px 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="board">
+    <section class="column"><h2>Ideas</h2><div class="card">Typed run events</div><div class="card">Artifact API</div></section>
+    <section class="column"><h2>Building</h2><div class="card">MCP tools</div></section>
+    <section class="column"><h2>Done</h2><div class="card">Redis replay</div><div class="card">Cancellation</div></section>
+  </div>
+</body>
+</html>"""
+    return {
+        "kind": "sandboxed-app",
+        "mimeType": "text/html",
+        "version": "v1",
+        "html": html,
+        "csp": {
+            "connectDomains": [],
+            "resourceDomains": [],
+            "frameDomains": [],
+        },
+    }
+
+
+def validate_artifact_profile(artifact: dict) -> None:
+    """
+    Validate the small approved declarative artifact profile before upload/streaming.
+    """
+    if artifact.get("kind") == "declarative-widget":
+        components = artifact.get("surface", {}).get("components", [])
+        if not components:
+            raise ValueError("Artifact must contain at least one component")
+        allowed_components = {"TextBlock", "Card", "Table", "Chart", "Form", "StatusTimeline"}
+        for component in components:
+            if component.get("type") not in allowed_components:
+                raise ValueError(f"Unsupported artifact component: {component.get('type')}")
+        return
+    if artifact.get("kind") == "sandboxed-app":
+        if artifact.get("mimeType") != "text/html" or not artifact.get("html"):
+            raise ValueError("Sandboxed app artifacts require text/html content")
+        return
+    raise ValueError(f"Unsupported artifact kind: {artifact.get('kind')}")
+
+
+async def create_declarative_artifact(run_id: str, thread_id: str, user_id: str, user_text: str) -> None:
+    """
+    Generate, validate, persist, and emit events for a controlled declarative artifact.
+    """
+    if should_generate_sales_artifact(user_text):
+        artifact = build_sales_artifact()
+        blob_filename = "widget.json"
+    elif should_generate_micro_app(user_text):
+        artifact = build_kanban_micro_app_artifact()
+        blob_filename = "app.json"
+    else:
+        return
+    if not blob_service_client:
+        logger.warning("Skipping artifact generation because Blob Storage is not configured.")
+        return
+
+    validate_artifact_profile(artifact)
+    artifact_json = json.dumps(artifact, ensure_ascii=False, separators=(",", ":"))
+    content_hash = f"sha256-{hashlib.sha256(artifact_json.encode('utf-8')).hexdigest()}"
+    artifact_id = f"artifact_{uuid.uuid4().hex}"
+    blob_path = f"artifacts/{user_id}/{run_id}/{artifact_id}/v1/{blob_filename}"
+    created_at = utc_now()
+    manifest = {
+        "id": artifact_id,
+        "artifactId": artifact_id,
+        "runId": run_id,
+        "threadId": thread_id,
+        "userId": user_id,
+        "kind": artifact["kind"],
+        "mimeType": artifact["mimeType"],
+        "version": artifact["version"],
+        "contentHash": content_hash,
+        "blobPath": blob_path,
+        "createdAt": created_at,
+        "artifactUrl": f"/api/artifacts/{artifact_id}",
+        "csp": {
+            "connectDomains": [],
+            "resourceDomains": [],
+            "frameDomains": [],
+        },
+        "provenance": {
+            "model": AZURE_OPENAI_DEPLOYMENT_NAME,
+            "tool": "generate_sales_artifact",
+        },
+    }
+
+    await append_run_event(
+        run_id,
+        thread_id,
+        "ArtifactCreated",
+        artifactId=artifact_id,
+        manifest=manifest,
+    )
+
+    blob_client = blob_service_client.get_blob_client(
+        container=ARTIFACTS_CONTAINER_NAME,
+        blob=blob_path,
+    )
+    await blob_client.upload_blob(
+        artifact_json.encode("utf-8"),
+        overwrite=True,
+        content_settings=ContentSettings(content_type=artifact["mimeType"]),
+    )
+    await redis_client.setex(f"artifact:{artifact_id}", RUN_TTL_SECONDS, json.dumps(manifest, ensure_ascii=False))
+
+    run_data = await redis_client.get(_run_key(run_id))
+    run = json.loads(run_data) if run_data else {}
+    artifacts = run.get("artifacts", [])
+    artifacts.append(artifact_id)
+    await update_run_metadata(run_id, artifacts=artifacts)
+
+    await append_run_event(
+        run_id,
+        thread_id,
+        "ArtifactFinalized",
+        artifactId=artifact_id,
+        manifest=manifest,
+    )
+
 async def process_message(sb_client: ServiceBusClient, service_bus_message):
     """
     Handle a single user message: parse, call LLM, and append typed run events.
@@ -545,6 +767,21 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
 
             await update_run_metadata(run_id, status="running", startedAt=utc_now())
             await append_run_event(run_id, thread_id, "RunStarted", status="running")
+            safety = evaluate_input_safety(user_text)
+            await append_run_event(run_id, thread_id, "SafetyVerdict", safety=safety)
+            if span.is_recording():
+                span.set_attribute("app.content_safety.input_verdict", safety["inputVerdict"])
+                span.set_attribute("app.content_safety.jailbreak", safety["categories"]["jailbreak"])
+            if safety["inputVerdict"] == "blocked":
+                await update_run_metadata(run_id, status="failed", completedAt=utc_now(), safety=safety)
+                await append_run_event(
+                    run_id,
+                    thread_id,
+                    "RunError",
+                    status="failed",
+                    error={"message": "Input was blocked by the demo content-safety policy.", "code": "content_safety_blocked"},
+                )
+                return
             await append_run_event(run_id, thread_id, "TextMessageStart", messageId=assistant_message_id, role="assistant")
 
             if await is_cancel_requested(run_id):
@@ -883,6 +1120,7 @@ async def process_message(sb_client: ServiceBusClient, service_bus_message):
                             await publish_legacy_token(sender, session_id, chat_message_id, content_chunk)
                             logger.debug(f"Sent follow-up token chunk: {content_chunk}")
 
+            await create_declarative_artifact(run_id, thread_id, user_id, user_text)
             await append_run_event(run_id, thread_id, "TextMessageEnd", messageId=assistant_message_id)
             await append_run_event(run_id, thread_id, "RunFinished", status="completed")
             await publish_legacy_eos(sender, session_id, chat_message_id)
@@ -1149,7 +1387,7 @@ Example response format:
 }
 
 async def main():
-    global chat_client, redis_client
+    global chat_client, redis_client, blob_service_client
     logger.info("Starting LLM worker...")
     logger.info(f"Service Bus Namespace: {SERVICEBUS_FULLY_QUALIFIED_NAMESPACE}")
     logger.info(f"Listening for user messages on Topic: '{SERVICEBUS_USER_MESSAGES_TOPIC}', Subscription: '{SERVICEBUS_USER_MESSAGES_SUBSCRIPTION}'")
@@ -1191,6 +1429,15 @@ async def main():
         azure_ad_token_provider=get_azure_token,
         api_version=AZURE_OPENAI_API_VERSION
     )
+
+    if STORAGE_ACCOUNT_URL:
+        blob_service_client = BlobServiceClient(
+            account_url=STORAGE_ACCOUNT_URL,
+            credential=shared_credential,
+        )
+        logger.info("Blob Storage client initialized successfully")
+    else:
+        logger.warning("STORAGE_ACCOUNT_URL not configured. Artifact generation will be disabled.")
     
     credential = DefaultAzureCredential()
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -1264,6 +1511,13 @@ async def main():
                 logger.info("Redis client closed successfully")
             except Exception as e:
                 logger.warning(f"Error closing Redis client: {e}")
+
+        if blob_service_client:
+            try:
+                await blob_service_client.close()
+                logger.info("Blob Storage client closed successfully")
+            except Exception as e:
+                logger.warning(f"Error closing Blob Storage client: {e}")
         
         logger.info("LLM worker shutdown complete.")
 

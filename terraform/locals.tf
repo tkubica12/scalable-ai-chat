@@ -6,4 +6,6 @@ locals {
   sse_service_url      = "https://ca-sseservice-${local.base_name}.${local.container_app_domain}"
   history_api_url      = "https://ca-historyapi-${local.base_name}.${local.container_app_domain}"
   memory_api_url       = "https://ca-memoryapi-${local.base_name}.${local.container_app_domain}"
+  web_client_url       = "https://ca-webclient-${local.base_name}.${local.container_app_domain}"
+  storage_account_url  = "https://${azapi_resource.storage_account_main.name}.blob.core.windows.net"
 }

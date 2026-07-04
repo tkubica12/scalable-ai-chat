@@ -101,6 +101,14 @@ resource "azapi_resource" "llm_worker" {
               {
                 name  = "MEMORY_API_TIMEOUT"
                 value = "4.0"
+              },
+              {
+                name  = "STORAGE_ACCOUNT_URL"
+                value = local.storage_account_url
+              },
+              {
+                name  = "ARTIFACTS_CONTAINER_NAME"
+                value = azurerm_storage_container.artifacts.name
               }
             ]
           }

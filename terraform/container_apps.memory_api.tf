@@ -78,6 +78,14 @@ resource "azapi_resource" "memory_api" {
                 value = "*"
               },
               {
+                name  = "MCP_ALLOWED_ORIGINS"
+                value = local.web_client_url
+              },
+              {
+                name  = "MCP_REQUIRE_AUTH"
+                value = "false"
+              },
+              {
                 name  = "PORT"
                 value = "8003"
               },

@@ -94,6 +94,14 @@ resource "azapi_resource" "front_service" {
               {
                 name  = "REDIS_SSL"
                 value = "true"
+              },
+              {
+                name  = "STORAGE_ACCOUNT_URL"
+                value = local.storage_account_url
+              },
+              {
+                name  = "ARTIFACTS_CONTAINER_NAME"
+                value = azurerm_storage_container.artifacts.name
               }
             ]
           }

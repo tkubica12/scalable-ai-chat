@@ -16,6 +16,7 @@ from azure.monitor.opentelemetry import configure_azure_monitor
 from opentelemetry import trace
 import redis.asyncio as redis
 from redis_entraid.cred_provider import create_from_default_azure_credential
+from azure.storage.blob.aio import BlobServiceClient
 from protocol import CreateRunRequest, RunCapabilities, RunInput, RunMetadata, RunResponse, utc_now
 
 # Load local .env when in development
@@ -28,6 +29,8 @@ REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6380"))
 REDIS_SSL = os.getenv("REDIS_SSL", "true").lower() == "true"
 RUN_TTL_SECONDS = int(os.getenv("RUN_TTL_SECONDS", str(24 * 60 * 60)))
+STORAGE_ACCOUNT_URL = os.getenv("STORAGE_ACCOUNT_URL")
+ARTIFACTS_CONTAINER_NAME = os.getenv("ARTIFACTS_CONTAINER_NAME", "artifacts")
 
 if not SERVICEBUS_FULLY_QUALIFIED_NAMESPACE or not SERVICEBUS_USER_MESSAGES_TOPIC or not REDIS_HOST:
     raise RuntimeError("Missing Service Bus configuration in environment variables")
@@ -62,13 +65,15 @@ sb_client: ServiceBusClient | None = None
 SERVICEBUS_SENDER_POOL_SIZE = int(os.getenv("SERVICEBUS_SENDER_POOL_SIZE", "10"))
 sender_pool: asyncio.Queue | None = None
 redis_client: redis.Redis | None = None
+blob_service_client: BlobServiceClient | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global sb_client, sender_pool, redis_client
+    global sb_client, sender_pool, redis_client, blob_service_client
 
     local_sb_client = None
     local_redis_client = None
+    local_blob_service_client = None
     
     try:
         logger.info("Application startup: Initializing Service Bus client.")
@@ -102,6 +107,16 @@ async def lifespan(app: FastAPI):
         )
         await local_redis_client.ping()
         redis_client = local_redis_client
+
+        if STORAGE_ACCOUNT_URL:
+            logger.info("Application startup: Initializing Blob Storage client.")
+            local_blob_service_client = BlobServiceClient(
+                account_url=STORAGE_ACCOUNT_URL,
+                credential=credential,
+            )
+            blob_service_client = local_blob_service_client
+        else:
+            logger.warning("STORAGE_ACCOUNT_URL is not configured; artifact API will be unavailable.")
         
         yield  # Application runs
 
@@ -119,12 +134,15 @@ async def lifespan(app: FastAPI):
             await local_sb_client.close()
         if local_redis_client:
             await local_redis_client.aclose()
+        if local_blob_service_client:
+            await local_blob_service_client.close()
         # Close credentials
         await credential.close()
         # Reset globals
         sb_client = None
         sender_pool = None
         redis_client = None
+        blob_service_client = None
 
 app = FastAPI(
     title="Scalable Chat Front Service",
@@ -171,6 +189,10 @@ def _run_key(run_id: str) -> str:
 
 def _run_map_key(session_id: str, chat_message_id: str) -> str:
     return f"run-map:{session_id}:{chat_message_id}"
+
+
+def _artifact_key(artifact_id: str) -> str:
+    return f"artifact:{artifact_id}"
 
 
 def _latest_user_text(run_request: CreateRunRequest) -> str:
@@ -332,6 +354,38 @@ async def cancel_run(runId: str):
         await redis_client.setex(_run_key(runId), RUN_TTL_SECONDS, json.dumps(run))
     await redis_client.setex(f"run:{runId}:cancel_requested", RUN_TTL_SECONDS, "true")
     return {"runId": runId, "status": run["status"]}
+
+
+@app.get("/api/artifacts/{artifactId}")
+async def get_artifact(artifactId: str):
+    """
+    Retrieve a JSON artifact from private Blob Storage using metadata written by the worker.
+    """
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis client not initialized.")
+    if not blob_service_client:
+        raise HTTPException(status_code=503, detail="Blob Storage client not initialized.")
+
+    metadata_data = await redis_client.get(_artifact_key(artifactId))
+    if not metadata_data:
+        raise HTTPException(status_code=404, detail="Artifact metadata not found.")
+
+    metadata = json.loads(metadata_data)
+    blob_path = metadata.get("blobPath")
+    if not blob_path:
+        raise HTTPException(status_code=404, detail="Artifact blob path not found.")
+
+    try:
+        blob_client = blob_service_client.get_blob_client(
+            container=ARTIFACTS_CONTAINER_NAME,
+            blob=blob_path,
+        )
+        artifact_bytes = await (await blob_client.download_blob()).readall()
+        artifact = json.loads(artifact_bytes.decode("utf-8"))
+        return {"manifest": metadata, "artifact": artifact}
+    except Exception as e:
+        logger.error("Failed to read artifact %s from blob %s: %s", artifactId, blob_path, e)
+        raise HTTPException(status_code=500, detail="Failed to read artifact.")
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(chat_message: ChatMessage, request: Request):

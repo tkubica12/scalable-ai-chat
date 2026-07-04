@@ -16,4 +16,5 @@ dependencies = [
     "azure-monitor-opentelemetry>=1.8.9",
     "redis>=5.0.0",
     "redis-entraid>=1.0.0",
+    "azure-storage-blob>=12.27.1",
 ]

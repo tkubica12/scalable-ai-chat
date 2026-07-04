@@ -5,9 +5,11 @@ This repo is leveraging cloud scale-to-zero services in Azure, fully automated w
 
 ## Current capabilities
 
-The chat path now uses a durable run abstraction in addition to the original compatibility endpoints. `front_service` exposes `POST /api/runs`, `GET /api/runs/{runId}`, and `POST /api/runs/{runId}/cancel`; `sse_service` exposes `GET /api/runs/{runId}/events` with replayable SSE frames backed by Redis Streams. The LLM worker emits typed AG-UI-shaped lifecycle, text, tool, usage, cancellation, and error events while still publishing the legacy token stream during migration.
+The chat path now uses a durable run abstraction in addition to the original compatibility endpoints. `front_service` exposes `POST /api/runs`, `GET /api/runs/{runId}`, `POST /api/runs/{runId}/cancel`, and `GET /api/artifacts/{artifactId}`; `sse_service` exposes `GET /api/runs/{runId}/events` with replayable SSE frames backed by Redis Streams. The LLM worker emits typed AG-UI-shaped lifecycle, text, tool, usage, safety, artifact, cancellation, and error events while still publishing the legacy token stream during migration.
 
-Container build workflows publish both `latest` and immutable `${{ github.sha }}` GHCR tags. Terraform provisions Azure Container Apps, Service Bus, Redis, Cosmos DB vector containers, private Blob artifact storage, and the newer Microsoft Foundry resource/project model.
+Container build workflows publish both `latest` and immutable `${{ github.sha }}` GHCR tags. Terraform provisions Azure Container Apps, Service Bus, Redis, Cosmos DB vector containers, private Blob artifact storage, and the newer Microsoft Foundry resource/project model with GPT-5.4-mini.
+
+MCP migration has started with `/mcp` JSON-RPC endpoints on Memory API and History API. A parallel `src/agent_client` Next.js/CopilotKit scaffold validates the CopilotKit migration path without replacing the deployed Svelte client.
 
 ## [Architecture](./docs/Architecture.md)
 Architecture overview of the project, evolving together with the code (in fact, architecture is created first and then used as context for GitHub Copilot when doing AI-assisted development).

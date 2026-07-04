@@ -165,11 +165,27 @@ Cancel a run explicitly:
 Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/runs/<runId>/cancel
 ```
 
+Prompts containing "sales", "table", and "chart" generate a validated declarative table/chart artifact. Prompts containing "kanban" or "micro-app" generate a sandboxed iframe micro-app artifact. Artifacts are stored in the private `artifacts` Blob container and retrieved through `GET /api/artifacts/{artifactId}`.
+
+### MCP endpoints
+
+Memory API and History API expose minimal Streamable-HTTP-style JSON-RPC endpoints at `/mcp`.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8003/mcp -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+Invoke-RestMethod -Method Post -Uri http://localhost:8005/mcp -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+Set `MCP_ALLOWED_ORIGINS` to allowed browser origins and `MCP_REQUIRE_AUTH=true` when fronted by authenticated ingress.
+
 ### Validation commands
 
 ```powershell
 python scripts\validate_protocol_examples.py
+python scripts\validate_artifact_examples.py
+python scripts\evaluate_safety_examples.py
 foreach ($svc in Get-ChildItem src -Directory) { if (Test-Path "$($svc.FullName)\pyproject.toml") { Push-Location $svc.FullName; uv run python -m compileall .; Pop-Location } }
 Push-Location src\web_client; npm ci; npm run build; Pop-Location
+Push-Location src\agent_client; npm install; npm run build; Pop-Location
 Push-Location terraform; terraform fmt -check; terraform validate; Pop-Location
 ```
