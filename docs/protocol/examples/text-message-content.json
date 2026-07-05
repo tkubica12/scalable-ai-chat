@@ -1,0 +1,9 @@
+{
+  "type": "TextMessageContent",
+  "runId": "run_example",
+  "threadId": "thread_example",
+  "messageId": "msg_example_assistant",
+  "sequence": 2,
+  "timestamp": "2026-07-04T08:00:01Z",
+  "delta": "Hello \"world\".\nThis stays valid JSON."
+}

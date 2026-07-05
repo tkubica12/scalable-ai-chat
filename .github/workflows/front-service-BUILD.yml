@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/front_service
         push: true
-        tags: ghcr.io/${{ github.repository }}/front-service:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/front-service:latest
+          ghcr.io/${{ github.repository }}/front-service:${{ github.sha }}

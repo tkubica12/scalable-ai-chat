@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/memory_worker
         push: true
-        tags: ghcr.io/${{ github.repository }}/memory-worker:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/memory-worker:latest
+          ghcr.io/${{ github.repository }}/memory-worker:${{ github.sha }}

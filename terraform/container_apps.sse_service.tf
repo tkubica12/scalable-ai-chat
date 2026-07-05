@@ -83,6 +83,18 @@ resource "azapi_resource" "sse_service" {
               {
                 name  = "OTEL_SERVICE_NAME"
                 value = "sse-service"
+              },
+              {
+                name  = "REDIS_HOST"
+                value = azapi_resource.redis.output.properties.hostName
+              },
+              {
+                name  = "REDIS_PORT"
+                value = "10000"
+              },
+              {
+                name  = "REDIS_SSL"
+                value = "true"
               }
             ]
           }

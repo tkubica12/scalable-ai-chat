@@ -16,6 +16,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+!src/web_client/src/lib/
+!src/web_client/src/lib/**
+!src/agent_client/lib/
+!src/agent_client/lib/**
 parts/
 sdist/
 var/
@@ -272,3 +276,7 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Next.js
+.next/
+src/agent_client/.next/

@@ -1,0 +1,31 @@
+{
+  "kind": "declarative-widget",
+  "mimeType": "application/vnd.scalable-ai-chat.a2ui+json",
+  "version": "v1",
+  "surface": {
+    "title": "Example monthly sales",
+    "components": [
+      {
+        "type": "Table",
+        "columns": [
+          { "key": "month", "label": "Month" },
+          { "key": "sales", "label": "Sales" }
+        ],
+        "rows": [
+          { "month": "January", "sales": 12000 },
+          { "month": "February", "sales": 15400 }
+        ]
+      },
+      {
+        "type": "Chart",
+        "chartType": "bar",
+        "xKey": "month",
+        "yKey": "sales",
+        "data": [
+          { "month": "January", "sales": 12000 },
+          { "month": "February", "sales": 15400 }
+        ]
+      }
+    ]
+  }
+}

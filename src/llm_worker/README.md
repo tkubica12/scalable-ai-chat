@@ -1,6 +1,6 @@
 # Scalable Chat Worker Service
 
-This worker service listens to the `user-messages` Azure Service Bus topic (via a specific subscription). When it receives a message, it processes the content and streams response tokens back to the `token-streams` Service Bus topic. The front-end service consumes these tokens and forwards them to the appropriate client via Server-Sent Events (SSE).
+This worker service listens to the `user-messages` Azure Service Bus topic (via a specific subscription). When it receives a message, it processes the content with Azure OpenAI/Foundry using Microsoft Entra authentication, appends typed run events to Redis Streams, and publishes legacy token messages to `token-streams` while old clients are still supported.
 
 ## Message Handling
 
@@ -8,24 +8,20 @@ This worker service listens to the `user-messages` Azure Service Bus topic (via 
     *   The worker picks up messages from its subscription on the `user-messages` topic.
     *   The message body is expected to be a JSON string containing:
         *   `text`: The user's query.
+        *   `runId`: Durable run identifier.
+        *   `threadId`: Durable thread/session identifier.
         *   `sessionId`: A unique identifier for the user's session.
-        *   `messageId`: A unique identifier for the specific message within that session.
+        *   `chatMessageId`: A unique identifier for the specific message within that session.
 
 2.  **Processing Messages**:
-    *   The worker (currently) simulates LLM processing by generating a static response based on the input text and `messageId`.
-    *   It streams this response character by character (as tokens).
+    *   The worker retrieves hot conversation history from Redis and user memory from Memory API.
+    *   It streams model output as `TextMessageContent` events in `run:{runId}:events`.
+    *   It emits lifecycle, tool-call, usage, cancellation, and error events.
+    *   It checks `run:{runId}:cancel_requested` before the model call, inside stream loops, and before tool calls.
 
-3.  **Sending Response Tokens**:
-    *   For each character (token) in the response, the worker sends a new message to the `token-streams` topic.
-    *   Each token message body is a JSON string containing:
-        *   `sessionId`: The original session ID from the input message.
-        *   `messageId`: The original message ID from the input message.
-        *   `token`: The character (token) being sent.
-    *   After all tokens for a response have been sent, the worker sends a final end-of-stream (EOS) sentinel message to the `token-streams` topic.
-    *   The EOS message body is a JSON string containing:
-        *   `sessionId`: The original session ID.
-        *   `messageId`: The original message ID.
-        *   `end_of_stream`: `true`.
+3.  **Sending Response Events**:
+    *   The primary stream is the Redis Stream `run:{runId}:events`.
+    *   The compatibility stream still sends token and EOS messages to `token-streams`.
 
 This `sessionId` and `messageId` are crucial for the front service to correctly route tokens and the EOS signal to the specific client and message stream that initiated the request.
 

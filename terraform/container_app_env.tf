@@ -5,4 +5,8 @@ resource "azurerm_container_app_environment" "main" {
   log_analytics_workspace_id     = azurerm_log_analytics_workspace.main.id
   infrastructure_subnet_id       = azurerm_subnet.aca.id
   internal_load_balancer_enabled = false
+
+  lifecycle {
+    ignore_changes = [infrastructure_resource_group_name]
+  }
 }

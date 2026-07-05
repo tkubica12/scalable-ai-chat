@@ -1,5 +1,8 @@
+# Microsoft Foundry resource (Microsoft.CognitiveServices/accounts, kind = AIServices).
+# `allowProjectManagement = true` is what turns this Cognitive Services account into a
+# Foundry resource capable of hosting Foundry projects as child resources (see ADR-008).
 resource "azapi_resource" "ai_service" {
-  type      = "Microsoft.CognitiveServices/accounts@2023-10-01-preview"
+  type      = "Microsoft.CognitiveServices/accounts@2025-04-01-preview"
   name      = "aidemo-${local.base_name}"
   location  = var.llm_location
   parent_id = azurerm_resource_group.main.id
@@ -11,8 +14,9 @@ resource "azapi_resource" "ai_service" {
   body = {
     name = "aidemo-${local.base_name}"
     properties = {
-        # restore             = true
-      customSubDomainName = "aidemo-${local.base_name}"
+      # restore             = true
+      customSubDomainName    = "aidemo-${local.base_name}"
+      allowProjectManagement = true
       #   apiProperties = {
       #     statisticsEnabled = false
       #   }
@@ -25,38 +29,17 @@ resource "azapi_resource" "ai_service" {
   response_export_values = ["*"]
 }
 
-resource "azapi_resource" "ai_hub" {
-  type      = "Microsoft.MachineLearningServices/workspaces@2024-04-01-preview"
-  name      = "aidemo-hub-${local.base_name}"
-  location  = var.llm_location
-  parent_id = azurerm_resource_group.main.id
-
-  identity {
-    type = "SystemAssigned"
-  }
-
-  body = {
-    properties = {
-      description         = "This is my Azure AI hub"
-      friendlyName        = "AI demo hub"
-      storageAccount      = azapi_resource.storage_account_main.id
-      keyVault            = azurerm_key_vault.main.id
-      applicationInsights = azurerm_application_insights.main.id
-      # containerRegistry = azurerm_container_registry.default.id
-    }
-    kind = "Hub"
-  }
-
-  lifecycle {
-    ignore_changes = [tags]
-  }
-}
-
+# Foundry project, a child resource of the Foundry resource above. Replaces the legacy
+# Microsoft.MachineLearningServices hub/project workspaces and their AIServices connection
+# (see ADR-008 in REFACTOR_PLAN.md). The azurerm provider version pinned in this project
+# (~> 4, currently 4.28.x) does not yet expose a native `azurerm_cognitive_account_project`
+# resource (that lands in azurerm >= 4.55), so azapi is used against the current
+# Microsoft.CognitiveServices/accounts/projects control-plane API instead, per ADR-008.
 resource "azapi_resource" "ai_project" {
-  type      = "Microsoft.MachineLearningServices/workspaces@2024-04-01-preview"
+  type      = "Microsoft.CognitiveServices/accounts/projects@2025-04-01-preview"
   name      = "aidemo-project-${local.base_name}"
   location  = var.llm_location
-  parent_id = azurerm_resource_group.main.id
+  parent_id = azapi_resource.ai_service.id
 
   identity {
     type = "SystemAssigned"
@@ -64,32 +47,8 @@ resource "azapi_resource" "ai_project" {
 
   body = {
     properties = {
-      description   = "This is my Azure AI PROJECT"
-      friendlyName  = "AI demo Project"
-      hubResourceId = azapi_resource.ai_hub.id
-    }
-    kind = "Project"
-  }
-}
-
-resource "azapi_resource" "ai_services_connection" {
-  type      = "Microsoft.MachineLearningServices/workspaces/connections@2024-04-01-preview"
-  name      = "default-${local.base_name}"
-  parent_id = azapi_resource.ai_hub.id
-
-  body = {
-    properties = {
-      category      = "AIServices"
-      target        = azapi_resource.ai_service.output.properties.endpoint
-      authType      = "AAD"
-      isSharedToAll = true
-      metadata = {
-        ApiType    = "Azure"
-        ResourceId = azapi_resource.ai_service.id
-      }
+      displayName = "AI demo Project"
+      description = "Foundry project for the scalable AI chat demo."
     }
   }
 }
-
-
-

@@ -1,5 +1,6 @@
 <script>
   import { onMount, afterUpdate } from 'svelte';
+  import { applyAgentEventToMessage, parseAgentEvent } from './lib/protocol/agentEvents.js';
   
   // Hardcoded users for development
   const USERS = [
@@ -18,12 +19,20 @@
   let conversations = [];
   let editingTitleSessionId = null;
   let editingTitle = '';
+  let activeRunId = null;
+  let activeAbortController = null;
   const API_URL = import.meta.env.API_URL || window._env_?.API_URL;
   const SSE_URL = import.meta.env.SSE_URL || window._env_?.SSE_URL;
   const HISTORY_API_URL = import.meta.env.HISTORY_API_URL || window._env_?.HISTORY_API_URL;
   const MEMORY_API_URL = import.meta.env.MEMORY_API_URL || window._env_?.MEMORY_API_URL;
 
   onMount(async () => {
+    window.addEventListener('message', (event) => {
+      if (event.origin !== window.location.origin) {
+        console.warn('Rejected artifact message from unexpected origin:', event.origin);
+      }
+    });
+
     try {
       const response = await fetch(`${API_URL}/api/session/start`, { 
         method: 'POST',
@@ -172,7 +181,7 @@
   }
 
   async function send() {
-    if (!question.trim() || !sessionId) return;
+    if (!question.trim() || !sessionId || activeRunId) return;
     const chatMessageId = crypto.randomUUID();
     const userMessage = { sender: 'user', content: question, id: chatMessageId };
     messages = [...messages, userMessage];
@@ -185,24 +194,41 @@
     question = ''; // Clear input
 
     try {
-      // 1. Post message to front service
-      const response = await fetch(`${API_URL}/api/chat`, {
+      // 1. Create a durable run in the front service.
+      const response = await fetch(`${API_URL}/api/runs`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: currentQuestion, sessionId, chatMessageId, userId: selectedUser.userId }),
+        body: JSON.stringify({
+          threadId: sessionId,
+          userId: selectedUser.userId,
+          input: {
+            messages: [{ role: 'user', content: currentQuestion }],
+            attachments: []
+          },
+          capabilities: {
+            text: true,
+            toolEvents: true,
+            declarativeArtifacts: true,
+            sandboxedApps: false
+          }
+        }),
       });
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const chatResponse = await response.json();
-      console.log('Message queued:', chatResponse);
+      const runResponse = await response.json();
+      activeRunId = runResponse.runId;
+      console.log('Run queued:', runResponse);
 
-      // 2. Connect to SSE service for streaming response
-      const sseResponse = await fetch(`${SSE_URL}/api/stream/${sessionId}/${chatMessageId}`);
+      // 2. Connect to the replayable run event stream.
+      activeAbortController = new AbortController();
+      const sseResponse = await fetch(`${SSE_URL}${runResponse.eventsUrl}`, {
+        signal: activeAbortController.signal
+      });
       
       if (!sseResponse.ok) {
         throw new Error(`SSE connection failed! status: ${sseResponse.status}`);
@@ -212,6 +238,7 @@
       const reader = sseResponse.body.getReader();
       const decoder = new TextDecoder();
       let assistantResponse = '';
+      let buffer = '';
 
       messages = messages.map(msg => 
         msg.id === assistantMessagePlaceholder.id ? { ...msg, isLoading: true, content: '' } : msg
@@ -220,39 +247,83 @@
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.substring(6);            if (dataStr === '__END__') {
-              messages = messages.map(msg => 
-                msg.id === assistantMessagePlaceholder.id ? { ...msg, isLoading: false } : msg
+        for (const frame of frames) {
+          if (!frame.trim() || frame.startsWith(':')) {
+            continue;
+          }
+          const dataLine = frame.split('\n').find(line => line.startsWith('data: '));
+          if (!dataLine) {
+            continue;
+          }
+          try {
+            const event = parseAgentEvent(dataLine.substring(6));
+            assistantResponse = applyAgentEventToMessage(event, assistantResponse);
+
+            if (event.type === 'ToolCallStart') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, toolStatus: `Using tool: ${event.name}` }
+                  : msg
               );
-              
-              // Refresh conversation history after message completion
-              // This ensures new conversations appear in the history immediately
+            }
+
+            if (event.type === 'Usage') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, usage: event.usage }
+                  : msg
+              );
+            }
+
+            if (event.type === 'ArtifactFinalized') {
+              const artifactResponse = await fetch(`${API_URL}${event.manifest.artifactUrl}`);
+              const artifactPayload = await artifactResponse.json();
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, artifacts: [...(msg.artifacts || []), artifactPayload.artifact] }
+                  : msg
+              );
+            }
+
+            if (event.type === 'TextMessageContent' || event.type === 'ToolCallStart' || event.type === 'Usage') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, content: assistantResponse, isLoading: true }
+                  : msg
+              );
+            }
+
+            if (event.type === 'RunFinished') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id ? { ...msg, isLoading: false, toolStatus: null } : msg
+              );
               await loadConversationHistory();
-              
-              return; // End of stream
+              return;
             }
-            try {
-              const data = JSON.parse(dataStr);
-              if (data.token) {
-                assistantResponse += data.token;
-                messages = messages.map(msg => 
-                  msg.id === assistantMessagePlaceholder.id ? { ...msg, content: assistantResponse, isLoading: true } : msg
-                );
-              }
-              if (data.error) {
-                messages = messages.map(msg => 
-                  msg.id === assistantMessagePlaceholder.id ? { ...msg, content: data.error, isLoading: false, isError: true } : msg
-                );
-                return;
-              }
-            } catch (e) {
-              console.error('Error parsing SSE data:', e, 'Raw data:', dataStr);
+
+            if (event.type === 'RunCancelled') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, content: assistantResponse || 'Run cancelled.', isLoading: false, isError: true, toolStatus: null }
+                  : msg
+              );
+              return;
             }
+
+            if (event.type === 'RunError') {
+              messages = messages.map(msg =>
+                msg.id === assistantMessagePlaceholder.id
+                  ? { ...msg, content: event.error?.message || 'Run failed.', isLoading: false, isError: true, toolStatus: null }
+                  : msg
+              );
+              return;
+            }
+          } catch (e) {
+            console.error('Error parsing run event:', e, 'Raw frame:', frame);
           }
         }
       }
@@ -261,7 +332,28 @@
       messages = messages.map(msg => 
         msg.id === assistantMessagePlaceholder.id ? { ...msg, content: 'Error: Could not connect to the server.', isLoading: false, isError: true } : msg
       );
+    } finally {
+      activeRunId = null;
+      activeAbortController = null;
     }  }
+
+  async function cancelActiveRun() {
+    if (!activeRunId) return;
+    try {
+      await fetch(`${API_URL}/api/runs/${activeRunId}/cancel`, { method: 'POST' });
+      activeAbortController?.abort();
+    } catch (error) {
+      console.error('Failed to cancel run:', error);
+    }
+  }
+
+  function formatCell(value) {
+    if (typeof value === 'number') {
+      return value.toLocaleString();
+    }
+    return value;
+  }
+
   async function toggleHistory() {
     // If opening the history panel, refresh the conversation list
     if (!showHistory) {
@@ -531,6 +623,67 @@
   .message.isError .content {
     color: red;
   }
+  .message-meta {
+    margin-top: 0.35rem;
+    font-size: 0.75rem;
+    color: #666;
+  }
+  .artifact-card {
+    margin-top: 0.75rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+    padding: 1rem;
+  }
+  .artifact-card h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.95rem;
+  }
+  .artifact-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .artifact-table th,
+  .artifact-table td {
+    border-bottom: 1px solid #f1f3f4;
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+  }
+  .artifact-bars {
+    display: flex;
+    align-items: end;
+    gap: 0.4rem;
+    height: 120px;
+    border-left: 1px solid #e5e7eb;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.5rem;
+  }
+  .artifact-bar {
+    flex: 1;
+    background: #222;
+    border-radius: 4px 4px 0 0;
+    min-height: 4px;
+  }
+  .artifact-bar-labels {
+    display: flex;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: #666;
+    margin-top: 0.25rem;
+  }
+  .artifact-bar-labels span {
+    flex: 1;
+    text-align: center;
+  }
+  .artifact-frame {
+    width: 100%;
+    min-height: 220px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+  }
   .content {
     flex: 1;
   }
@@ -571,6 +724,16 @@
   }
   button:hover {
     background: #444;
+  }
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+  .cancel-button {
+    background: #7f1d1d;
+  }
+  .cancel-button:hover {
+    background: #991b1b;
   }
     /* Memory Panel Styles */
   .memory-panel {
@@ -1220,13 +1383,79 @@
     <div bind:this={messagesContainer} class="messages">
       {#each messages as message (message.id)}
         <div class="message" class:user={message.sender === 'user'} class:assistant={message.sender === 'assistant'} class:isLoading={message.isLoading} class:isError={message.isError}>
-          <div class="content">{message.content}</div>
+          <div class="content">
+            <div>{message.content}</div>
+            {#if message.toolStatus}
+              <div class="message-meta">{message.toolStatus}</div>
+            {/if}
+            {#if message.usage}
+              <div class="message-meta">
+                Tokens: {message.usage.inputTokens} in / {message.usage.outputTokens} out
+              </div>
+            {/if}
+            {#each message.artifacts || [] as artifact}
+              <div class="artifact-card">
+                {#if artifact.kind === 'declarative-widget'}
+                  <h4>{artifact.surface.title}</h4>
+                  {#each artifact.surface.components as component}
+                    {#if component.type === 'Table'}
+                      <table class="artifact-table">
+                        <thead>
+                          <tr>
+                            {#each component.columns as column}
+                              <th>{column.label}</th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each component.rows as row}
+                            <tr>
+                              {#each component.columns as column}
+                                <td>{formatCell(row[column.key])}</td>
+                              {/each}
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    {:else if component.type === 'Chart'}
+                      <div class="artifact-bars">
+                        {#each component.data as row}
+                          <div
+                            class="artifact-bar"
+                            style={`height: ${(row[component.yKey] / Math.max(...component.data.map(item => item[component.yKey]))) * 100}%`}
+                            title={`${row[component.xKey]}: ${formatCell(row[component.yKey])}`}
+                          ></div>
+                        {/each}
+                      </div>
+                      <div class="artifact-bar-labels">
+                        {#each component.data as row}
+                          <span>{row[component.xKey].slice(0, 3)}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  {/each}
+                {:else if artifact.kind === 'sandboxed-app'}
+                  <h4>Sandboxed micro-app</h4>
+                  <iframe
+                    class="artifact-frame"
+                    title="Sandboxed artifact"
+                    sandbox="allow-scripts"
+                    srcdoc={artifact.html}
+                  ></iframe>
+                {/if}
+              </div>
+            {/each}
+          </div>
         </div>
       {/each}
     </div>
     <form on:submit|preventDefault={send} class="chat-input">
-      <input type="text" bind:value={question} placeholder="Type your message..." />
-      <button type="submit">Send</button>
+      <input type="text" bind:value={question} placeholder="Type your message..." disabled={Boolean(activeRunId)} />
+      {#if activeRunId}
+        <button type="button" class="cancel-button" on:click={cancelActiveRun}>Cancel</button>
+      {:else}
+        <button type="submit" disabled={!question.trim()}>Send</button>
+      {/if}
     </form>  </div>
     <!-- Memory Panel -->
   {#if showMemory}

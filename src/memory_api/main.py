@@ -6,7 +6,7 @@ import uvicorn
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -94,6 +94,8 @@ app = FastAPI(
 # Configure CORS
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 allowed_origins = [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
+MCP_ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("MCP_ALLOWED_ORIGINS", CORS_ORIGINS).split(",") if origin.strip()]
+MCP_REQUIRE_AUTH = os.getenv("MCP_REQUIRE_AUTH", "false").lower() == "true"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -155,6 +157,14 @@ class UserMemoryUpdate(BaseModel):
     userId: str
     updates: Dict[str, Any]
 
+class McpRequest(BaseModel):
+    """Minimal JSON-RPC request body for the MCP Streamable HTTP endpoint."""
+
+    jsonrpc: str = "2.0"
+    id: Optional[str | int] = None
+    method: str
+    params: Dict[str, Any] = {}
+
 # Helper functions
 async def generate_embedding(text: str) -> List[float]:
     """
@@ -195,12 +205,125 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     
     return float(np.dot(vec1_np, vec2_np) / (norm1 * norm2))
 
+def validate_mcp_request_security(request: Request) -> None:
+    """Validate MCP origin and optional auth requirements."""
+    origin = request.headers.get("origin")
+    if origin and "*" not in MCP_ALLOWED_ORIGINS and origin not in MCP_ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="Origin is not allowed for MCP access")
+    if MCP_REQUIRE_AUTH and not (request.headers.get("authorization") or request.headers.get("x-ms-client-principal")):
+        raise HTTPException(status_code=401, detail="MCP access requires authenticated caller context")
+
+def mcp_result(request_id: Optional[str | int], result: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a JSON-RPC success response."""
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+def mcp_error(request_id: Optional[str | int], code: int, message: str) -> Dict[str, Any]:
+    """Build a JSON-RPC error response."""
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+async def get_user_memory_payload(user_id: str) -> Dict[str, Any]:
+    """Return user memory as a JSON-serializable dictionary for REST and MCP callers."""
+    memory = await get_user_memories(user_id)
+    return memory.model_dump(mode="json")
+
+async def search_conversation_history_payload(user_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Return conversation search results as JSON-serializable dictionaries."""
+    results = await search_conversation_memories(user_id, MemorySearchRequest(query=query, limit=limit))
+    return [result.model_dump(mode="json") for result in results]
+
 # REST API Endpoints
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "memory-api"}
+
+@app.get("/mcp")
+async def mcp_metadata():
+    """Return MCP endpoint metadata for discovery and health probes."""
+    return {
+        "service": "memory-api",
+        "transport": "streamable-http-json-rpc",
+        "protocolVersion": "2025-11-25",
+        "tools": ["get_user_memory", "search_conversation_history"],
+    }
+
+@app.post("/mcp")
+async def mcp_endpoint(rpc: McpRequest, request: Request):
+    """Handle minimal MCP JSON-RPC initialize, tool, and resource requests."""
+    validate_mcp_request_security(request)
+
+    if rpc.method == "initialize":
+        return mcp_result(rpc.id, {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}, "resources": {}},
+            "serverInfo": {"name": "scalable-chat-memory-api", "version": "0.1.0"},
+        })
+
+    if rpc.method == "tools/list":
+        return mcp_result(rpc.id, {
+            "tools": [
+                {
+                    "name": "get_user_memory",
+                    "description": "Retrieve structured long-term memory for a user.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"userId": {"type": "string"}},
+                        "required": ["userId"],
+                    },
+                },
+                {
+                    "name": "search_conversation_history",
+                    "description": "Search a user's remembered conversation summaries.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "userId": {"type": "string"},
+                            "query": {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                        },
+                        "required": ["userId", "query"],
+                    },
+                },
+            ]
+        })
+
+    if rpc.method == "tools/call":
+        tool_name = rpc.params.get("name")
+        arguments = rpc.params.get("arguments", {})
+        if tool_name == "get_user_memory":
+            payload = await get_user_memory_payload(arguments["userId"])
+        elif tool_name == "search_conversation_history":
+            payload = await search_conversation_history_payload(
+                arguments["userId"],
+                arguments["query"],
+                int(arguments.get("limit", 5)),
+            )
+        else:
+            return mcp_error(rpc.id, -32601, f"Unknown tool: {tool_name}")
+        return mcp_result(rpc.id, {"content": [{"type": "json", "json": payload}]})
+
+    if rpc.method == "resources/list":
+        return mcp_result(rpc.id, {
+            "resources": [
+                {
+                    "uri": "memory://users/{userId}",
+                    "name": "User memory",
+                    "description": "Structured user memory resource template.",
+                    "mimeType": "application/json",
+                }
+            ]
+        })
+
+    if rpc.method == "resources/read":
+        uri = rpc.params.get("uri", "")
+        prefix = "memory://users/"
+        if not uri.startswith(prefix):
+            return mcp_error(rpc.id, -32602, "Unsupported memory resource URI")
+        payload = await get_user_memory_payload(uri.removeprefix(prefix))
+        return mcp_result(rpc.id, {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload)}]})
+
+    return mcp_error(rpc.id, -32601, f"Unsupported MCP method: {rpc.method}")
 
 @app.get("/api/memory/users/{user_id}/memories", response_model=UserMemory)
 async def get_user_memories(user_id: str):

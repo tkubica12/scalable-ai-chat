@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/history_api
         push: true
-        tags: ghcr.io/${{ github.repository }}/history-api:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/history-api:latest
+          ghcr.io/${{ github.repository }}/history-api:${{ github.sha }}

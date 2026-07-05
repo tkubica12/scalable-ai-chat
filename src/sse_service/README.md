@@ -1,11 +1,13 @@
 # SSE Service
 
-This service handles Server-Sent Events (SSE) streaming for the scalable chat application. It's responsible for receiving tokens from the message queue and streaming them to connected clients.
+This service handles Server-Sent Events (SSE) streaming for the scalable chat application. The primary path streams typed run events from Redis Streams; the legacy path can still receive token messages from Service Bus sessions during migration.
 
 ## Features
 
-- **Session-aware streaming**: Uses Service Bus sessions to receive tokens for specific chat sessions
-- **Message filtering**: Filters tokens by `chatMessageId` to ensure proper routing
+- **Run event streaming**: Streams `id:`, `event:`, and JSON `data:` SSE frames from `run:{runId}:events`
+- **Replay support**: Uses `Last-Event-ID` to replay events after a reconnect
+- **Session-aware compatibility streaming**: Uses Service Bus sessions for old `/api/stream/{sessionId}/{chatMessageId}` clients
+- **Message filtering**: Filters legacy tokens by `chatMessageId` to ensure proper routing
 - **Error handling**: Graceful error handling with client notification
 - **Health checks**: Built-in health check endpoint
 - **CORS support**: Configurable CORS for cross-origin requests
@@ -27,6 +29,7 @@ Copy `.env.example` to `.env` and configure the following variables:
 - `SERVICEBUS_FULLY_QUALIFIED_NAMESPACE`: Your Azure Service Bus namespace
 - `SERVICEBUS_TOKEN_STREAMS_TOPIC`: The topic name for token streams
 - `SERVICEBUS_TOKEN_STREAMS_SUBSCRIPTION`: The subscription name for this service
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_SSL`: Redis Stream connection settings
 - `CORS_ORIGINS`: Allowed CORS origins (comma-separated)
 - `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR)
 
@@ -42,9 +45,21 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 
 ## API Endpoints
 
+### GET /api/runs/{runId}/events
+
+Establishes an SSE connection to stream typed run events. Reconnect with `Last-Event-ID: <sequence>` to resume after the last received event.
+
+Each event frame uses:
+
+```text
+id: 42
+event: TextMessageContent
+data: {"type":"TextMessageContent","runId":"run_...","threadId":"...","sequence":42,"timestamp":"...","delta":"hello"}
+```
+
 ### GET /api/stream/{sessionId}/{chatMessageId}
 
-Establishes an SSE connection to stream tokens for a specific chat message.
+Compatibility endpoint. If a Redis run mapping exists, it attaches to the new run event stream. Otherwise, it falls back to legacy Service Bus token streaming.
 
 **Parameters:**
 - `sessionId`: The session identifier

@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/web_client
         push: true
-        tags: ghcr.io/${{ github.repository }}/web-client:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/web-client:latest
+          ghcr.io/${{ github.repository }}/web-client:${{ github.sha }}

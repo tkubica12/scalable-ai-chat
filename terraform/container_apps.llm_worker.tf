@@ -71,6 +71,10 @@ resource "azapi_resource" "llm_worker" {
                 value = "true"
               },
               {
+                name  = "APP_VERSION"
+                value = "20260704-refactor-complete"
+              },
+              {
                 name  = "AZURE_OPENAI_ENDPOINT"
                 value = "https://${azapi_resource.ai_service.name}.openai.azure.com"
               },
@@ -96,11 +100,19 @@ resource "azapi_resource" "llm_worker" {
               },
               {
                 name  = "MEMORY_API_ENDPOINT"
-                value = "https://${azapi_resource.memory_api.output.properties.configuration.ingress.fqdn}"
+                value = local.memory_api_url
               },
               {
                 name  = "MEMORY_API_TIMEOUT"
                 value = "4.0"
+              },
+              {
+                name  = "STORAGE_ACCOUNT_URL"
+                value = local.storage_account_url
+              },
+              {
+                name  = "ARTIFACTS_CONTAINER_NAME"
+                value = azurerm_storage_container.artifacts.name
               }
             ]
           }

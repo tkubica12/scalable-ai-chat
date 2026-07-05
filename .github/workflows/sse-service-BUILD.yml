@@ -30,4 +30,6 @@ jobs:
       with:
         context: src/sse_service
         push: true
-        tags: ghcr.io/${{ github.repository }}/sse-service:latest
+        tags: |
+          ghcr.io/${{ github.repository }}/sse-service:latest
+          ghcr.io/${{ github.repository }}/sse-service:${{ github.sha }}
