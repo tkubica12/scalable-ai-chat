@@ -20,8 +20,8 @@ The goal is to show a scalable AI chat system without hiding the distributed-sys
 ```mermaid
 flowchart LR
     Browser[Browser UI] -->|POST /api/runs| Front[Front Service]
-    Browser -->|GET /api/runs/{runId}/events| Stream[SSE Service]
-    Browser -->|GET /api/artifacts/{artifactId}| Front
+    Browser -->|"GET /api/runs/<runId>/events"| Stream[SSE Service]
+    Browser -->|"GET /api/artifacts/<artifactId>"| Front
 
     Front -->|enqueue run| UserMessages[[Service Bus: user-messages]]
     UserMessages --> Worker[LLM Worker / Agent Runtime]
@@ -55,7 +55,7 @@ stateDiagram-v2
     queued --> running: worker starts
     running --> completed: RunFinished
     running --> failed: RunError
-    running --> cancelling: POST /api/runs/{runId}/cancel
+    running --> cancelling: POST /api/runs/<runId>/cancel
     cancelling --> cancelled: RunCancelled
     completed --> [*]
     failed --> [*]
@@ -80,7 +80,7 @@ sequenceDiagram
     F->>R: Store run metadata
     F->>SB: Queue run payload
     F-->>B: runId + eventsUrl
-    B->>S: GET /api/runs/{runId}/events
+    B->>S: GET /api/runs/<runId>/events
     SB-->>W: Deliver run
     W->>R: RunStarted, SafetyVerdict
     W->>R: TextMessageStart
